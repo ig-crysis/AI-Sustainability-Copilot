@@ -1,0 +1,25 @@
+# Environment files — never commit these
+backend/.env
+frontend/.env
+frontend/.env.production
+*.env
+
+# Model files — too large for GitHub
+backend/model/artifacts/*.pkl
+backend/data/processed/*.pkl
+backend/data/processed/*.csv
+backend/data/raw/*.csv
+backend/data/raw/*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+
+# MLflow
+backend/mlruns/
