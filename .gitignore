@@ -4,10 +4,7 @@ frontend/.env
 frontend/.env.production
 *.env
 
-# Model files — too large for GitHub
-backend/model/artifacts/*.pkl
-backend/data/processed/*.pkl
-backend/data/processed/*.csv
+# Raw datasets only (large files 47MB)
 backend/data/raw/*.csv
 backend/data/raw/*.xlsx
 
