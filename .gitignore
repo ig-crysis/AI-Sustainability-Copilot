@@ -4,9 +4,12 @@ frontend/.env
 frontend/.env.production
 *.env
 
-# Raw datasets only (large files 47MB)
-backend/data/raw/*.csv
-backend/data/raw/*.xlsx
+# Raw datasets only (large files)
+backend/data/raw/
+
+# Large model files we don't need
+backend/model/artifacts/rf_model.pkl
+backend/model/artifacts/xgboost_model.pkl
 
 # Python
 __pycache__/
@@ -20,3 +23,4 @@ frontend/dist/
 
 # MLflow
 backend/mlruns/
+backend/mlflow.db
