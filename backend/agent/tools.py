@@ -1,31 +1,45 @@
 import os
 import warnings
 warnings.filterwarnings("ignore", message=".*Falling back to prediction.*")
+warnings.filterwarnings("ignore", category=UserWarning)
 
 import joblib
 import httpx
 import pandas as pd
 import numpy as np
+import xgboost as xgb
 from langchain.tools import tool
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Load trained model + preprocessors ──────────────────────────────────────
-MODEL_PATH    = os.path.join("model", "artifacts", "best_model.pkl")
-ENCODERS_PATH = os.path.join("data", "processed", "encoders.pkl")
-SCALER_PATH   = os.path.join("data", "processed", "scaler.pkl")
-IGES_PATH     = os.path.join("data", "raw", "IGES_GHG_Emissions_DB.xlsx")
-OWID_PATH     = os.path.join("data", "raw", "owid_co2.csv")
+# ── Paths ────────────────────────────────────────────────────────────────────
+MODEL_UBJ_PATH = os.path.join("model", "artifacts", "best_model.ubj")
+MODEL_PKL_PATH = os.path.join("model", "artifacts", "best_model.pkl")
+ENCODERS_PATH  = os.path.join("data", "processed", "encoders.pkl")
+SCALER_PATH    = os.path.join("data", "processed", "scaler.pkl")
+OWID_PKL_PATH  = os.path.join("data", "processed", "owid_baselines.pkl")
+IGES_PATH      = os.path.join("data", "raw", "IGES_GHG_Emissions_DB.xlsx")
 
-model    = joblib.load(MODEL_PATH)
+# ── Load XGBoost booster (version-independent native format) ─────────────────
+def _load_booster():
+    if os.path.exists(MODEL_UBJ_PATH):
+        b = xgb.Booster()
+        b.load_model(MODEL_UBJ_PATH)
+        print(f"[INFO] Loaded XGBoost from native format: {MODEL_UBJ_PATH}")
+        return b
+    # Fallback to pkl with suppressed warnings
+    print(f"[INFO] Loading XGBoost from pkl: {MODEL_PKL_PATH}")
+    m = joblib.load(MODEL_PKL_PATH)
+    try:
+        m.set_params(device="cpu")
+    except Exception:
+        pass
+    return m.get_booster()
+
+booster  = _load_booster()
 encoders = joblib.load(ENCODERS_PATH)
 scaler   = joblib.load(SCALER_PATH)
-
-try:
-    model.set_params(device="cpu")
-except Exception:
-    pass
 
 CO2SIGNAL_API_KEY = os.getenv("CO2SIGNAL_API_KEY", "")
 
@@ -37,7 +51,7 @@ TRANSPORT_EF = {
     "walking":      0.0,
 }
 
-# ── Real food emission factors from Poore & Nemecek (kg CO2e/kg food) ───────
+# ── Food emission factors from Poore & Nemecek 2018 ─────────────────────────
 def _load_food_ef() -> dict:
     food_ef_path = os.path.join("data", "processed", "food_ef_real.pkl")
     if os.path.exists(food_ef_path):
@@ -45,8 +59,8 @@ def _load_food_ef() -> dict:
     return {
         "beef": 27.0, "lamb": 39.2, "pork": 12.1, "chicken": 6.9,
         "fish":  6.1, "eggs":  4.8, "dairy": 3.2, "rice":    4.0,
-        "vegetables": 2.0, "fruits": 1.1, "legumes": 0.9, "nuts": 2.5,
-        "grains": 1.6,
+        "vegetables": 2.0, "fruits": 1.1, "legumes": 0.9,
+        "nuts": 2.5, "grains": 1.6,
     }
 
 FOOD_EF = _load_food_ef()
@@ -60,18 +74,15 @@ ENERGY_INTENSITY = {
 }
 ENERGY_EF = {k: v / 1000 for k, v in ENERGY_INTENSITY.items()}
 
-# ── Training data feature ranges (for distribution check) ───────────────────
-# These come from the preprocessing output — used to detect extrapolation
+# ── Training distribution ranges ─────────────────────────────────────────────
 TRAINING_RANGES = {
-    "km_per_day":       (0.0,   400.0),
-    "kg_food_per_day":  (0.0,     0.6),
-    "kwh_per_day":      (0.0,    20.0),
-    "flights_per_year": (0,        10),
-    "flight_km_total":  (0,     20000),
+    "km_per_day":       (0.0,  400.0),
+    "kg_food_per_day":  (0.0,    0.6),
+    "kwh_per_day":      (0.0,   20.0),
+    "flights_per_year": (0,       10),
+    "flight_km_total":  (0,    20000),
 }
-
-# ── Dataset average monthly CO2 (used as ML adjustment baseline) ─────────────
-DATASET_MEAN_CO2 = 190.96  # from training data target mean
+DATASET_MEAN_CO2 = 190.96
 
 # ── Country mappings ─────────────────────────────────────────────────────────
 COUNTRY_ZONE = {
@@ -80,36 +91,46 @@ COUNTRY_ZONE = {
     "canada": "CA", "japan": "JP", "china": "CN", "brazil": "BR",
 }
 
-ZONE_TO_ENERGY_SOURCE = {
-    "IN": "grid_india", "US": "grid_us", "DE": "grid_eu",
-    "FR": "grid_eu",    "GB": "grid_eu", "AU": "grid_us",
-    "CA": "grid_us",    "JP": "grid_eu",
-}
-
-# ── OWID per-capita baselines ────────────────────────────────────────────────
+# ── OWID baselines — pkl first, then hardcoded fallback ──────────────────────
 def _load_owid_baselines() -> dict:
-    baselines = {}
-    try:
-        df = pd.read_csv(OWID_PATH, usecols=["country", "year", "co2_per_capita"])
-        df = df.dropna(subset=["co2_per_capita"])
-        latest = df.sort_values("year").groupby("country").last().reset_index()
-        for _, row in latest.iterrows():
-            country_key = row["country"].lower().strip()
-            annual_t    = float(row["co2_per_capita"])
-            monthly_kg  = round(annual_t * 1000 / 12, 2)
-            baselines[country_key] = {
-                "per_capita_monthly_kg":    monthly_kg,
-                "per_capita_annual_tonnes": round(annual_t, 3),
-                "year": int(row["year"]),
-            }
-    except Exception as e:
-        print(f"[WARN] Could not load OWID baselines: {e}")
-    return baselines
+    if os.path.exists(OWID_PKL_PATH):
+        try:
+            data = joblib.load(OWID_PKL_PATH)
+            print(f"[INFO] Loaded OWID baselines: {len(data)} countries")
+            return data
+        except Exception as e:
+            print(f"[WARN] Could not load owid_baselines.pkl: {e}")
+
+    # Hardcoded fallback for common countries (IEA/GCP 2023)
+    print("[WARN] Using hardcoded OWID fallback")
+    return {
+        "india":          {"per_capita_monthly_kg": 183.42,  "per_capita_annual_tonnes": 2.201, "year": 2023},
+        "china":          {"per_capita_monthly_kg": 583.33,  "per_capita_annual_tonnes": 7.0,   "year": 2023},
+        "united states":  {"per_capita_monthly_kg": 1191.67, "per_capita_annual_tonnes": 14.3,  "year": 2023},
+        "germany":        {"per_capita_monthly_kg": 564.08,  "per_capita_annual_tonnes": 6.769, "year": 2023},
+        "united kingdom": {"per_capita_monthly_kg": 416.67,  "per_capita_annual_tonnes": 5.0,   "year": 2023},
+        "france":         {"per_capita_monthly_kg": 375.0,   "per_capita_annual_tonnes": 4.5,   "year": 2023},
+        "australia":      {"per_capita_monthly_kg": 1166.67, "per_capita_annual_tonnes": 14.0,  "year": 2023},
+        "canada":         {"per_capita_monthly_kg": 1291.67, "per_capita_annual_tonnes": 15.5,  "year": 2023},
+        "japan":          {"per_capita_monthly_kg": 691.67,  "per_capita_annual_tonnes": 8.3,   "year": 2023},
+        "brazil":         {"per_capita_monthly_kg": 183.33,  "per_capita_annual_tonnes": 2.2,   "year": 2023},
+        "south africa":   {"per_capita_monthly_kg": 508.33,  "per_capita_annual_tonnes": 6.1,   "year": 2023},
+        "indonesia":      {"per_capita_monthly_kg": 175.0,   "per_capita_annual_tonnes": 2.1,   "year": 2023},
+        "pakistan":       {"per_capita_monthly_kg": 91.67,   "per_capita_annual_tonnes": 1.1,   "year": 2023},
+        "bangladesh":     {"per_capita_monthly_kg": 41.67,   "per_capita_annual_tonnes": 0.5,   "year": 2023},
+        "russia":         {"per_capita_monthly_kg": 1000.0,  "per_capita_annual_tonnes": 12.0,  "year": 2023},
+        "italy":          {"per_capita_monthly_kg": 475.0,   "per_capita_annual_tonnes": 5.7,   "year": 2023},
+        "spain":          {"per_capita_monthly_kg": 433.33,  "per_capita_annual_tonnes": 5.2,   "year": 2023},
+        "sweden":         {"per_capita_monthly_kg": 333.33,  "per_capita_annual_tonnes": 4.0,   "year": 2023},
+        "norway":         {"per_capita_monthly_kg": 750.0,   "per_capita_annual_tonnes": 9.0,   "year": 2023},
+        "saudi arabia":   {"per_capita_monthly_kg": 1283.33, "per_capita_annual_tonnes": 15.4,  "year": 2023},
+        "uae":            {"per_capita_monthly_kg": 1750.0,  "per_capita_annual_tonnes": 21.0,  "year": 2023},
+    }
 
 OWID_BASELINES = _load_owid_baselines()
 
 
-# ── Live carbon intensity fetch ──────────────────────────────────────────────
+# ── Live carbon intensity ─────────────────────────────────────────────────────
 def _fetch_live_intensity(zone: str, baseline: float) -> dict:
     if CO2SIGNAL_API_KEY:
         for url, headers in [
@@ -134,7 +155,6 @@ def _fetch_live_intensity(zone: str, baseline: float) -> dict:
 def _check_in_training_range(km_per_day, kg_food_per_day,
                               kwh_per_day, flights_per_year,
                               flight_km_total) -> bool:
-    """Check if inputs are within the model's training distribution."""
     checks = [
         TRAINING_RANGES["km_per_day"][0] <= km_per_day <= TRAINING_RANGES["km_per_day"][1],
         TRAINING_RANGES["kg_food_per_day"][0] <= kg_food_per_day <= TRAINING_RANGES["kg_food_per_day"][1],
@@ -170,7 +190,6 @@ def predict_footprint(
     IPCC emission factors as physical ground truth (primary),
     XGBoost lifestyle adjustment factor (secondary),
     live grid carbon intensity for real-time energy correction.
-
     transport_type: car_petrol, car_diesel, car_ev, bus, train,
                     flight_short, flight_long, motorcycle, bicycle, walking.
     food_type: beef, lamb, pork, chicken, fish, eggs, dairy,
@@ -179,13 +198,11 @@ def predict_footprint(
                    nuclear, grid_india, grid_us, grid_eu.
     country: user country for live grid e.g. 'india', 'germany'.
     waste_bag_size: small, medium, large, extra large.
-    waste_bags_per_week: number of waste bags generated per week.
-    new_clothes_per_month: number of new clothing items purchased monthly.
-    grocery_bill_monthly: monthly grocery spend (USD equivalent).
+    waste_bags_per_week: number of waste bags per week.
+    new_clothes_per_month: number of new clothing items monthly.
+    grocery_bill_monthly: monthly grocery spend USD equivalent.
     energy_efficient: true if user uses energy-efficient appliances.
     """
-
-    # ── Step 1: Compute derived lifestyle features ───────────────────────────
     WASTE_CO2_WEEKLY = {
         "small": 0.5, "medium": 1.0, "large": 2.0, "extra large": 3.5
     }
@@ -194,34 +211,22 @@ def predict_footprint(
     clothing_co2_monthly = (new_clothes_per_month * 10.0) / 12
     energy_eff_val       = 1.0 if energy_efficient else 0.0
 
-    # ── Step 2: Live grid intensity ──────────────────────────────────────────
     zone          = COUNTRY_ZONE.get(country.lower(), "IN")
     baseline_gco2 = ENERGY_INTENSITY.get(energy_source, 708)
     live          = _fetch_live_intensity(zone, baseline_gco2)
     live_gco2     = live["intensity"]
 
-    # ── Step 3: IPCC primary calculation using REAL quantities ───────────────
-    # Uses actual physical inputs — kg_food_per_day, km_per_day, kwh_per_day
-    # as stated by the user, NOT the compressed training approximations.
-    # This is the ground truth physical calculation.
+    # IPCC primary calculation
     transport_co2 = km_per_day * 30 * TRANSPORT_EF.get(transport_type, 0.1)
     food_co2      = kg_food_per_day * 30 * FOOD_EF.get(food_type, 3.0)
     energy_co2    = kwh_per_day * 30 * (live_gco2 / 1000)
     flight_co2    = (flight_km_total / 12) * TRANSPORT_EF["flight_long"]
     waste_co2     = waste_co2_monthly
     clothing_co2  = clothing_co2_monthly
+    ipcc_total    = max(transport_co2 + food_co2 + energy_co2 +
+                        flight_co2 + waste_co2 + clothing_co2, 0)
 
-    ipcc_total = max(
-        transport_co2 + food_co2 + energy_co2 +
-        flight_co2 + waste_co2 + clothing_co2,
-        0
-    )
-
-    # ── Step 4: XGBoost lifestyle adjustment ─────────────────────────────────
-    # XGBoost captures behavioral variance beyond the primary emission categories
-    # (social activity, grocery patterns, energy efficiency habits etc.)
-    # We use it as a bounded multiplier relative to the dataset mean.
-    # Only applied when inputs are within the model's training distribution.
+    # XGBoost lifestyle adjustment
     ml_adjustment = 1.0
     ml_pred_kg    = None
     in_range      = _check_in_training_range(
@@ -252,33 +257,26 @@ def predict_footprint(
                 "energy_efficient":      energy_eff_val,
             }
 
-            df = pd.DataFrame([row_data])
+            df_pred = pd.DataFrame([row_data])
             for col in cat_cols:
                 if col in encoders:
                     try:
-                        df[col] = encoders[col].transform(df[col].astype(str))
+                        df_pred[col] = encoders[col].transform(
+                            df_pred[col].astype(str))
                     except ValueError:
-                        df[col] = 0
+                        df_pred[col] = 0
 
-            df[num_cols] = scaler.transform(df[num_cols])
-
-            import xgboost as xgb
-            dmatrix    = xgb.DMatrix(df[cat_cols + num_cols])
-            ml_pred_kg = float(model.get_booster().predict(dmatrix)[0])
-
-            # Adjustment factor: how does this profile compare to dataset mean?
-            # Clamped to ±15% — prevents wild extrapolation
-            ml_adjustment = float(np.clip(ml_pred_kg / DATASET_MEAN_CO2, 0.85, 1.15))
-
+            df_pred[num_cols] = scaler.transform(df_pred[num_cols])
+            dmatrix    = xgb.DMatrix(df_pred[cat_cols + num_cols])
+            ml_pred_kg = float(booster.predict(dmatrix)[0])
+            ml_adjustment = float(np.clip(
+                ml_pred_kg / DATASET_MEAN_CO2, 0.85, 1.15
+            ))
         except Exception as e:
             print(f"[WARN] XGBoost adjustment failed: {e}")
             ml_adjustment = 1.0
 
-    # ── Step 5: Final prediction ─────────────────────────────────────────────
-    # IPCC physical calculation × XGBoost lifestyle adjustment
-    final_co2 = max(round(ipcc_total * ml_adjustment, 2), 0)
-
-    # ── Step 6: Live grid delta for reporting ────────────────────────────────
+    final_co2    = max(round(ipcc_total * ml_adjustment, 2), 0)
     energy_delta = round(
         kwh_per_day * 30 * ((live_gco2 - baseline_gco2) / 1000), 2
     )
@@ -292,23 +290,23 @@ def predict_footprint(
         "live_intensity_gco2_kwh":  round(live_gco2, 1),
         "annual_estimate_kg":       round(final_co2 * 12, 2),
         "breakdown": {
-            "transport_kg":  round(transport_co2, 2),
-            "food_kg":       round(food_co2, 2),
-            "energy_kg":     round(energy_co2, 2),
-            "flights_kg":    round(flight_co2, 2),
-            "waste_kg":      round(waste_co2, 2),
-            "clothing_kg":   round(clothing_co2, 2),
+            "transport_kg": round(transport_co2, 2),
+            "food_kg":      round(food_co2, 2),
+            "energy_kg":    round(energy_co2, 2),
+            "flights_kg":   round(flight_co2, 2),
+            "waste_kg":     round(waste_co2, 2),
+            "clothing_kg":  round(clothing_co2, 2),
         },
         "data_sources": {
-            "primary":      "IPCC AR6 + Poore & Nemecek 2018 emission factors",
-            "adjustment":   f"XGBoost lifestyle model R²=0.829 "
-                            f"({'applied' if in_range else 'skipped — inputs outside training range'})",
-            "grid_data":    live["source"],
+            "primary":   "IPCC AR6 + Poore & Nemecek 2018 emission factors",
+            "adjustment": f"XGBoost R²=0.829 "
+                          f"({'applied' if in_range else 'skipped-out of range'})",
+            "grid_data": live["source"],
         },
         "method": (
             "IPCC primary × XGBoost lifestyle adjustment × live grid correction"
             if in_range else
-            "IPCC primary × live grid correction (XGBoost skipped — out of range)"
+            "IPCC primary × live grid correction (XGBoost skipped)"
         ),
     }
 
@@ -355,48 +353,37 @@ def compare_transport_scenarios(km_per_day: float, days: int = 30) -> dict:
     """
     total_km  = km_per_day * days
     scenarios = {
-        mode: {
-            "co2_kg":    round(total_km * ef, 2),
-            "ef_per_km": ef,
-        }
+        mode: {"co2_kg": round(total_km * ef, 2), "ef_per_km": ef}
         for mode, ef in TRANSPORT_EF.items()
     }
     sorted_s = dict(sorted(scenarios.items(), key=lambda x: x[1]["co2_kg"]))
     best     = list(sorted_s.keys())[0]
     worst    = list(sorted_s.keys())[-1]
-
     for mode in sorted_s:
         sorted_s[mode]["saving_vs_worst_kg"] = round(
             scenarios[worst]["co2_kg"] - scenarios[mode]["co2_kg"], 2
         )
-
     return {
-        "total_km":      total_km,
-        "days":          days,
-        "scenarios":     sorted_s,
-        "best_option":   best,
-        "worst_option":  worst,
+        "total_km": total_km, "days": days, "scenarios": sorted_s,
+        "best_option": best, "worst_option": worst,
         "max_saving_kg": round(
-            scenarios[worst]["co2_kg"] - scenarios[best]["co2_kg"], 2
-        ),
+            scenarios[worst]["co2_kg"] - scenarios[best]["co2_kg"], 2),
         "source": "IPCC AR6 Working Group III transport emission factors",
     }
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# TOOL 4 — Regional baseline (OWID + IGES)
+# TOOL 4 — Regional baseline (OWID + hardcoded fallback)
 # ────────────────────────────────────────────────────────────────────────────
 @tool
 def get_regional_baseline(country: str) -> dict:
     """
     Get per-capita CO2 baseline for a country.
-    Uses Our World in Data (latest year) as primary source,
-    IGES UNFCCC database as secondary for Annex I countries.
+    Uses Our World in Data (latest year) as primary source.
     country: e.g. 'India', 'Germany', 'United States'.
     """
     country_lower = country.strip().lower()
 
-    # ── Primary: OWID dataset ─────────────────────────────────────────────────
     if country_lower in OWID_BASELINES:
         b = OWID_BASELINES[country_lower]
         return {
@@ -408,52 +395,7 @@ def get_regional_baseline(country: str) -> dict:
             "note": f"Latest available year: {b['year']}",
         }
 
-    # ── Secondary: IGES UNFCCC ────────────────────────────────────────────────
-    POPULATION_M = {
-        "germany": 83.2, "france": 67.8, "austria": 9.1, "belgium": 11.6,
-        "netherlands": 17.9, "sweden": 10.5, "norway": 5.4, "finland": 5.5,
-        "denmark": 5.9, "poland": 37.8, "italy": 59.2, "spain": 47.4,
-        "portugal": 10.3, "czech republic": 10.9, "hungary": 9.7,
-        "romania": 19.0, "bulgaria": 6.5, "croatia": 3.9,
-        "united kingdom": 67.3, "australia": 25.9, "canada": 38.2,
-        "japan": 125.7, "united states": 331.4,
+    return {
+        "error": f"'{country}' not found in baselines database.",
+        "hint":  "Try: India, Germany, United States, China, Brazil, Japan",
     }
-
-    try:
-        df = pd.read_excel(IGES_PATH, sheet_name="GHG & CO2 EMISSIONS", header=0)
-        df.columns = df.iloc[0]
-        df = df.iloc[1:].reset_index(drop=True)
-
-        match = df[df["Party"].str.strip().str.lower().str.contains(
-            country_lower, na=False
-        )]
-        if match.empty:
-            return {
-                "error": f"'{country}' not found in OWID or IGES databases.",
-                "hint":  "Try the full country name e.g. 'United States', 'United Kingdom'",
-            }
-
-        row      = match[match["Emission Type"] == "GHG"].iloc[0]
-        yr_cols  = [c for c in df.columns
-                    if isinstance(c, (int, float)) and 1990 <= c <= 2022]
-        recent   = sorted(yr_cols)[-5:]
-        trend    = {str(int(y)): round(float(row[y]) / 1000, 2)
-                    for y in recent if pd.notna(row[y])}
-
-        latest_yr = str(int(max(recent)))
-        latest_mt = trend.get(latest_yr, 0)
-        pop       = POPULATION_M.get(country_lower, 10)
-        per_cap_t = round((latest_mt * 1e6) / (pop * 1e6), 2)
-        monthly   = round(per_cap_t * 1000 / 12, 2)
-
-        return {
-            "country":                  country,
-            "per_capita_monthly_kg":    monthly,
-            "per_capita_annual_tonnes": per_cap_t,
-            "data_year":                latest_yr,
-            "trend_last_5_years_mt":    trend,
-            "source":                   "IGES GHG Emissions DB (UNFCCC official submissions)",
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
