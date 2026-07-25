@@ -119,9 +119,10 @@ if (predictStep) {
 }
 
     } catch (err) {
+      console.error('[chat] request failed:', err)
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: '⚠️ Something went wrong. Make sure the backend is running on port 8000.',
+        content: `⚠️ Something went wrong: ${err.response?.data?.detail || err.message}`,
         tools: [],
       }])
     } finally {
