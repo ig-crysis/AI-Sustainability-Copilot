@@ -74,6 +74,12 @@ ENERGY_INTENSITY = {
 }
 ENERGY_EF = {k: v / 1000 for k, v in ENERGY_INTENSITY.items()}
 
+# ── Device / shower energy rates (kWh) — arithmetic lives here, not in the LLM
+DEVICE_KWH_PER_HR = {"phone": 0.005, "laptop": 0.05, "desktop": 0.1, "tv": 0.1}
+SHOWER_KWH = {"daily": 0.9, "less_frequent": 0.45, "twice_daily": 1.8, "none": 0.0}
+BASE_HOUSEHOLD_KWH = 2.0
+MEAL_KG = 0.15  # standard meal portion
+
 # ── Training distribution ranges ─────────────────────────────────────────────
 TRAINING_RANGES = {
     "km_per_day":       (0.0,  400.0),
@@ -82,7 +88,6 @@ TRAINING_RANGES = {
     "flights_per_year": (0,       10),
     "flight_km_total":  (0,    20000),
 }
-DATASET_MEAN_CO2 = 190.96
 
 # ── Country mappings ─────────────────────────────────────────────────────────
 COUNTRY_ZONE = {
@@ -173,11 +178,15 @@ def predict_footprint(
     transport_type: str,
     km_per_day: float,
     food_type: str,
-    kg_food_per_day: float,
+    meals_with_this_food_per_week: float,
     energy_source: str,
-    kwh_per_day: float,
-    flights_per_year: int,
-    flight_km_total: float,
+    phone_hours_per_day: float = 0.0,
+    laptop_hours_per_day: float = 0.0,
+    desktop_hours_per_day: float = 0.0,
+    tv_hours_per_day: float = 0.0,
+    shower_frequency: str = "daily",
+    flights_per_year: int = 0,
+    avg_km_per_flight: float = 0.0,
     country: str = "india",
     waste_bag_size: str = "medium",
     waste_bags_per_week: float = 1.0,
@@ -187,15 +196,30 @@ def predict_footprint(
 ) -> dict:
     """
     Predict monthly carbon footprint (kg CO2) using a hybrid pipeline:
-    IPCC emission factors as physical ground truth (primary),
-    XGBoost lifestyle adjustment factor (secondary),
-    live grid carbon intensity for real-time energy correction.
+    XGBoost (trained directly on real survey data, R²=0.83) as the primary
+    predictor, corrected for real-time grid carbon intensity. IPCC/Poore &
+    Nemecek emission factors are used only for the explanatory per-category
+    breakdown shown to the user, not for the total.
+
+    All arguments are raw facts — extract only what the user stated, do NOT
+    do any arithmetic yourself (no multiplying, adding, or averaging). This
+    tool computes every derived quantity internally.
+
     transport_type: car_petrol, car_diesel, car_ev, bus, train,
                     flight_short, flight_long, motorcycle, bicycle, walking.
+    km_per_day: distance traveled per day by transport_type.
     food_type: beef, lamb, pork, chicken, fish, eggs, dairy,
                rice, vegetables, fruits, legumes, nuts, grains.
+    meals_with_this_food_per_week: how many times/week they eat food_type
+                                    (0-7; "every day"=7, "once a week"=1).
     energy_source: coal, natural_gas, oil, solar, wind, hydro,
                    nuclear, grid_india, grid_us, grid_eu.
+    phone_hours_per_day / laptop_hours_per_day / desktop_hours_per_day /
+    tv_hours_per_day: hours/day using that device (0 if not mentioned).
+    shower_frequency: one of daily, less_frequent, twice_daily, none.
+    flights_per_year: number of flights taken per year (a plain count, e.g.
+                       "2 round trips" = 2 — do not multiply by distance).
+    avg_km_per_flight: typical distance of one flight in km.
     country: user country for live grid e.g. 'india', 'germany'.
     waste_bag_size: small, medium, large, extra large.
     waste_bags_per_week: number of waste bags per week.
@@ -211,12 +235,28 @@ def predict_footprint(
     clothing_co2_monthly = (new_clothes_per_month * 10.0) / 12
     energy_eff_val       = 1.0 if energy_efficient else 0.0
 
+    # ── Arithmetic the LLM used to be asked to do — now computed here ────────
+    kg_food_per_day = round(
+        max(min(meals_with_this_food_per_week, 7.0), 0.0) / 7.0 * MEAL_KG, 4
+    )
+    kwh_per_day = round(
+        phone_hours_per_day * DEVICE_KWH_PER_HR["phone"]
+        + laptop_hours_per_day * DEVICE_KWH_PER_HR["laptop"]
+        + desktop_hours_per_day * DEVICE_KWH_PER_HR["desktop"]
+        + tv_hours_per_day * DEVICE_KWH_PER_HR["tv"]
+        + SHOWER_KWH.get(shower_frequency.lower(), 0.9)
+        + BASE_HOUSEHOLD_KWH,
+        3,
+    )
+    flight_km_total = float(flights_per_year) * float(avg_km_per_flight)
+
     zone          = COUNTRY_ZONE.get(country.lower(), "IN")
     baseline_gco2 = ENERGY_INTENSITY.get(energy_source, 708)
     live          = _fetch_live_intensity(zone, baseline_gco2)
     live_gco2     = live["intensity"]
 
-    # IPCC primary calculation
+    # IPCC breakdown — illustrative per-category numbers shown to the user,
+    # and the fallback total when XGBoost can't be trusted (out of range).
     transport_co2 = km_per_day * 30 * TRANSPORT_EF.get(transport_type, 0.1)
     food_co2      = kg_food_per_day * 30 * FOOD_EF.get(food_type, 3.0)
     energy_co2    = kwh_per_day * 30 * (live_gco2 / 1000)
@@ -226,10 +266,12 @@ def predict_footprint(
     ipcc_total    = max(transport_co2 + food_co2 + energy_co2 +
                         flight_co2 + waste_co2 + clothing_co2, 0)
 
-    # XGBoost lifestyle adjustment
-    ml_adjustment = 1.0
-    ml_pred_kg    = None
-    in_range      = _check_in_training_range(
+    # XGBoost — primary predictor, trained directly on real survey data
+    # (R²=0.83 on held-out test set; see backend/evaluate_ablation.py).
+    # It cannot see live grid intensity, so we correct its output with the
+    # delta between live and the category's training-time baseline intensity.
+    ml_pred_kg = None
+    in_range   = _check_in_training_range(
         km_per_day, kg_food_per_day, kwh_per_day,
         flights_per_year, flight_km_total
     )
@@ -269,22 +311,27 @@ def predict_footprint(
             df_pred[num_cols] = scaler.transform(df_pred[num_cols])
             dmatrix    = xgb.DMatrix(df_pred[cat_cols + num_cols])
             ml_pred_kg = float(booster.predict(dmatrix)[0])
-            ml_adjustment = float(np.clip(
-                ml_pred_kg / DATASET_MEAN_CO2, 0.85, 1.15
-            ))
         except Exception as e:
-            print(f"[WARN] XGBoost adjustment failed: {e}")
-            ml_adjustment = 1.0
+            print(f"[WARN] XGBoost prediction failed: {e}")
+            ml_pred_kg = None
 
-    final_co2    = max(round(ipcc_total * ml_adjustment, 2), 0)
     energy_delta = round(
         kwh_per_day * 30 * ((live_gco2 - baseline_gco2) / 1000), 2
     )
 
+    if ml_pred_kg is not None:
+        # Primary path: XGBoost prediction + live-grid correction.
+        final_co2 = max(round(ml_pred_kg + energy_delta, 2), 0)
+    else:
+        # Fallback for inputs outside the training distribution, or if the
+        # model failed to load/predict: use the physical IPCC estimate
+        # directly (already live-grid-corrected via energy_co2 above).
+        final_co2 = round(ipcc_total, 2)
+
     return {
         "predicted_monthly_co2_kg": final_co2,
-        "ipcc_baseline_kg":         round(ipcc_total, 2),
-        "ml_adjustment_factor":     round(ml_adjustment, 4),
+        "ml_prediction_kg":         round(ml_pred_kg, 2) if ml_pred_kg is not None else None,
+        "ipcc_breakdown_total_kg":  round(ipcc_total, 2),
         "ml_in_training_range":     in_range,
         "live_grid_delta_kg":       energy_delta,
         "live_intensity_gco2_kwh":  round(live_gco2, 1),
@@ -298,15 +345,16 @@ def predict_footprint(
             "clothing_kg":  round(clothing_co2, 2),
         },
         "data_sources": {
-            "primary":   "IPCC AR6 + Poore & Nemecek 2018 emission factors",
-            "adjustment": f"XGBoost R²=0.829 "
-                          f"({'applied' if in_range else 'skipped-out of range'})",
+            "primary":   (f"XGBoost trained on real survey data (R²=0.83)"
+                          if ml_pred_kg is not None else
+                          "IPCC AR6 + Poore & Nemecek 2018 (ML out of training range)"),
+            "breakdown": "IPCC AR6 + Poore & Nemecek 2018 emission factors (illustrative, per-category)",
             "grid_data": live["source"],
         },
         "method": (
-            "IPCC primary × XGBoost lifestyle adjustment × live grid correction"
-            if in_range else
-            "IPCC primary × live grid correction (XGBoost skipped)"
+            "XGBoost primary + live grid correction"
+            if ml_pred_kg is not None else
+            "IPCC formula fallback + live grid correction (XGBoost out of range)"
         ),
     }
 

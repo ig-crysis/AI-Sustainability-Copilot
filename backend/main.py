@@ -49,11 +49,15 @@ class FootprintRequest(BaseModel):
     transport_type: str
     km_per_day: float
     food_type: str
-    kg_food_per_day: float
+    meals_with_this_food_per_week: float
     energy_source: str
-    kwh_per_day: float
-    flights_per_year: int
-    flight_km_total: float
+    phone_hours_per_day: float = 0.0
+    laptop_hours_per_day: float = 0.0
+    desktop_hours_per_day: float = 0.0
+    tv_hours_per_day: float = 0.0
+    shower_frequency: str = "daily"
+    flights_per_year: int = 0
+    avg_km_per_flight: float = 0.0
 
 class FootprintResponse(BaseModel):
     predicted_monthly_co2_kg: float
@@ -131,28 +135,25 @@ async def predict(request: FootprintRequest):
     runs the full agentic pipeline, returns structured + explained result.
     """
     try:
+        # Call the tool directly with the caller's structured, already-atomic
+        # facts — no LLM round-trip needed (or wanted) for the numeric result.
+        from agent.tools import predict_footprint
+        pred = predict_footprint.invoke(request.model_dump())
+        monthly_co2 = pred.get("predicted_monthly_co2_kg", 0.0)
+        breakdown   = pred.get("breakdown", {})
+
+        # Still run the agent for a natural-language analysis/commentary
+        # (regional comparison, transport alternatives, etc.).
         query = (
             f"I use a {request.transport_type.replace('_', ' ')} for "
             f"{request.km_per_day}km daily, eat {request.food_type} "
-            f"({request.kg_food_per_day}kg/day), use {request.energy_source.replace('_', ' ')} "
-            f"electricity ({request.kwh_per_day} kWh/day), and take "
-            f"{request.flights_per_year} flights per year ({request.flight_km_total}km total). "
+            f"{request.meals_with_this_food_per_week} times a week, use "
+            f"{request.energy_source.replace('_', ' ')} electricity, and take "
+            f"{request.flights_per_year} flights per year averaging "
+            f"{request.avg_km_per_flight}km each. "
             f"Analyze my carbon footprint in detail."
         )
-
         result = run_agent(query)
-
-        # Extract prediction from tool steps
-        monthly_co2 = 0.0
-        breakdown   = {}
-        for step in result["steps"]:
-            if step["tool"] == "predict_footprint":
-                # Re-run tool directly for structured data
-                from agent.tools import predict_footprint
-                pred = predict_footprint.invoke(step["input"])
-                monthly_co2 = pred.get("predicted_monthly_co2_kg", 0.0)
-                breakdown   = pred.get("breakdown", {})
-                break
 
         return FootprintResponse(
             predicted_monthly_co2_kg=monthly_co2,

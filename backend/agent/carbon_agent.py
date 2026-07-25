@@ -34,18 +34,26 @@ SYSTEM_PROMPT = """You are an expert AI sustainability copilot. Your role is to:
 5. Always give specific, quantified, actionable suggestions
 
 CRITICAL RULES for calling predict_footprint:
-- ONLY include data the user explicitly mentioned
-- If the user did NOT mention food, set food_type="vegetables" and kg_food_per_day=0.0
-- If the user did NOT mention flights, set flights_per_year=0 and flight_km_total=0
-- If the user did NOT mention a vehicle, set transport_type="bicycle" and km_per_day=0
+- ONLY extract raw facts the user explicitly mentioned — NEVER compute,
+  multiply, add, or average anything yourself. predict_footprint takes only
+  atomic quantities (a count, an hours/day number, a category label) and
+  does all arithmetic internally. If you catch yourself about to write a
+  math expression as an argument value, stop — extract the raw fact instead.
+- If the user did NOT mention food, set food_type="vegetables" and
+  meals_with_this_food_per_week=0
+- If the user did NOT mention flights, set flights_per_year=0 and
+  avg_km_per_flight=0
+- If the user did NOT mention a vehicle, set transport_type="bicycle" and
+  km_per_day=0
+- meals_with_this_food_per_week is a plain count 0-7 ("once a week"=1,
+  "twice a week"=2, "every day"=7) — do not convert this to kg yourself
+- flights_per_year is a plain count of flights/trips — do not multiply by
+  distance yourself; pass the distance separately as avg_km_per_flight
+- Device hours (phone/laptop/desktop/tv_hours_per_day) and
+  shower_frequency (daily/less_frequent/twice_daily/none) are passed as-is;
+  default all device hours to 0 and shower_frequency to "daily" if not
+  mentioned
 - NEVER assume or hallucinate values the user did not provide
-
-FOOD QUANTITY RULES:
-- "eats X once a week" = 0.15kg × 1/7 = 0.021 kg/day
-- "eats X twice a week" = 0.15kg × 2/7 = 0.043 kg/day
-- "eats X thrice a week" = 0.15kg × 3/7 = 0.064 kg/day
-- "eats X every day" = 0.15 kg/day
-- Standard meal portion = 150g = 0.15 kg
 
 LIFESTYLE FEATURE RULES (extract if mentioned):
 - Waste: infer waste_bag_size from context (small/medium/large/extra large)
@@ -54,11 +62,6 @@ LIFESTYLE FEATURE RULES (extract if mentioned):
 - Grocery: grocery_bill_monthly in USD equivalent — if not mentioned, default 200
 - Energy efficiency: energy_efficient=true only if user explicitly says
   they use LED bulbs, efficient appliances, or similar
-
-DEVICE ENERGY RULES:
-- phone ~0.005 kWh/hr, laptop ~0.05 kWh/hr, desktop ~0.1 kWh/hr, TV ~0.1 kWh/hr
-- shower: daily=0.9 kWh, less frequent=0.45 kWh, twice daily=1.8 kWh
-- Add 2.0 kWh base household consumption
 
 Workflow for every query:
 - ALWAYS call predict_footprint first to get the ML model estimate
@@ -193,7 +196,7 @@ if __name__ == "__main__":
     print("Checking tools load correctly...")
 
     try:
-        from agent.tools import model, encoders, scaler
+        from agent.tools import booster, encoders, scaler
         print("[OK] XGBoost model loaded")
         print("[OK] Encoders loaded")
         print("[OK] Scaler loaded")
