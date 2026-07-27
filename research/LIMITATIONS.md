@@ -42,8 +42,45 @@ system changes.
   route to the IPCC fallback rather than XGBoost — this is correct given
   the feature's narrow training range, not a regression.
 
+- **Rewriting the ReAct agent into a fixed 2-call pipeline (for latency,
+  see the root README) silently reintroduced a `tool_use_failed` failure
+  mode, undetected until `evaluate_agent.py` was re-run against the new
+  code.** The rewrite grew `predict_footprint`'s docstring with more
+  conditional rules; the docstring listed each categorical field's valid
+  values as prose (e.g. "transport_type: car_petrol, car_diesel, ...
+  bicycle, walking"). `llama-3.1-8b-instant` would sometimes misread that
+  list of *allowed values* for a single field as separate *fields to
+  fill in*, hallucinating extra keys (e.g. `"bicycle": 0, "car_petrol": 0`)
+  alongside the real `transport_type` argument. The resulting call didn't
+  match the tool's JSON schema, and Groq fell back to Llama's native
+  `<function=...>` text format, which is rejected outright as
+  `tool_use_failed`. Measured at **6/14 (43%) of test queries** failing
+  right after the rewrite, paced at 20s between calls to rule out the
+  6000 TPM rate limit as the cause (confirmed via repeated single-query
+  reruns showing the same malformed-generation pattern regardless of
+  load). Fixed two ways: (1) declared the five categorical arguments as
+  `Literal[...]` type hints instead of prose, which compiles into an
+  actual JSON schema `enum` constraint — a much stronger signal to a small
+  model than a sentence to parse; (2) split the extraction call onto its
+  own `temperature=0` LLM instance (previously shared at 0.2 with the
+  prose-generating synthesis call) — determinism matters for a call that
+  must emit structured output, not for one writing free text. Together
+  these dropped the failure rate to **1/14 (7.1%)** on the same test
+  cases. This is a general lesson for the paper: adding LLM-facing rules
+  to a docstring is not free — each new prose constraint is a new chance
+  for a small model to misparse the schema, and should be measured, not
+  assumed safe.
+
 ## Open limitations
 
+- **Residual ~7% tool-call failure rate remains, even after the fix
+  above.** Confirmed via repeated single-query reruns that this is
+  inherent flakiness in `llama-3.1-8b-instant`'s structured-output
+  reliability, not a deterministic per-query bug — the same query
+  succeeds most of the time and fails occasionally. `temperature=0`
+  reduced but did not eliminate it. Not further mitigated in this pass;
+  a retry-once-on-`tool_use_failed` wrapper would likely close most of
+  the remaining gap cheaply.
 - **Single train/test split, no k-fold cross-validation.** The reported
   R²=0.83 is from one 80/20 split (`random_state=42`). No variance estimate
   across folds — only a bootstrap CI on that single split's residuals.

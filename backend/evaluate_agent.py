@@ -31,6 +31,7 @@ stable) before citing numbers in a paper. Requires GROQ_API_KEY to be set.
 """
 
 import sys
+import time
 from statistics import mean
 
 sys.path.insert(0, ".")
@@ -59,6 +60,14 @@ ABS_TOL = {
     "flights_per_year": 0.4, "avg_km_per_flight": 250.0,
 }
 REL_TOL = 0.15
+
+# This Groq API key is capped at 6000 tokens/minute (see research/LIMITATIONS.md).
+# Each case makes 2 LLM calls (~2000-2200 tokens combined); firing all cases
+# back-to-back blows the budget and Groq degrades into malformed
+# tool_use_failed 400s instead of clean 429s, which looks like an accuracy
+# regression but is actually a burst-load artifact. Pace requests to stay
+# under the budget so this harness measures steady-state accuracy.
+SLEEP_BETWEEN_CASES_SECONDS = 20
 
 # ── Test cases ────────────────────────────────────────────────────────────────
 CASES = [
@@ -259,7 +268,9 @@ def run():
     agent_errors = 0
     failures = []
 
-    for case in CASES:
+    for i, case in enumerate(CASES):
+        if i > 0:
+            time.sleep(SLEEP_BETWEEN_CASES_SECONDS)
         try:
             result = run_agent(case["query"])
         except Exception as e:

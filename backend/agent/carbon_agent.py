@@ -118,11 +118,11 @@ def get_threshold_instruction(monthly_co2: float) -> str:
         )
 
 
-def _build_llm():
+def _build_llm(temperature: float = 0.2):
     return ChatGroq(
         model="llama-3.1-8b-instant",
         api_key=os.getenv("GROQ_API_KEY"),
-        temperature=0.2,
+        temperature=temperature,
     )
 
 
@@ -147,10 +147,12 @@ def run_agent(user_message: str, chat_history: list = None) -> dict:
     if chat_history is None:
         chat_history = []
 
-    llm = _build_llm()
-
-    # ── Call 1 of 2: extract structured facts and call predict_footprint ────
-    extraction_llm = llm.bind_tools([predict_footprint])
+    # temperature=0 for extraction: this call must reliably emit a
+    # structured tool call, not prose — determinism reduces the model's
+    # chance of falling back to its native <function=...> text format
+    # (Groq tool_use_failed). The synthesis call below writes free text,
+    # where a little variation is fine, so it keeps the higher temperature.
+    extraction_llm = _build_llm(temperature=0.0).bind_tools([predict_footprint])
     messages = (
         [SystemMessage(content=EXTRACTION_SYSTEM_PROMPT)]
         + chat_history
@@ -220,7 +222,7 @@ COMPUTED RESULTS (use these exact numbers, do not recompute):
         + chat_history
         + [HumanMessage(content=context_block)]
     )
-    final_msg = llm.invoke(synthesis_messages)
+    final_msg = _build_llm().invoke(synthesis_messages)
     final_response = final_msg.content if isinstance(final_msg.content, str) else ""
 
     return {

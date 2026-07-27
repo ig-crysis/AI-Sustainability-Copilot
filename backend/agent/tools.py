@@ -3,6 +3,8 @@ import warnings
 warnings.filterwarnings("ignore", message=".*Falling back to prediction.*")
 warnings.filterwarnings("ignore", category=UserWarning)
 
+from typing import Literal
+
 import joblib
 import httpx
 import pandas as pd
@@ -184,22 +186,31 @@ def _check_in_training_range(km_per_day, kg_food_per_day,
 # ────────────────────────────────────────────────────────────────────────────
 @tool
 def predict_footprint(
-    transport_type: str = "bicycle",
+    transport_type: Literal[
+        "car_petrol", "car_diesel", "car_ev", "bus", "train",
+        "flight_short", "flight_long", "motorcycle", "bicycle", "walking",
+    ] = "bicycle",
     km_per_day: float = 0.0,
-    food_type: str = "vegetables",
+    food_type: Literal[
+        "beef", "lamb", "pork", "chicken", "fish", "eggs", "dairy",
+        "rice", "vegetables", "fruits", "legumes", "nuts", "grains",
+    ] = "vegetables",
     meals_with_this_food_per_week: float = 0.0,
-    energy_source: str = "grid_india",
+    energy_source: Literal[
+        "coal", "natural_gas", "oil", "solar", "wind", "hydro",
+        "nuclear", "grid_india", "grid_us", "grid_eu",
+    ] = "grid_india",
     total_kg_food_per_day: float = 0.0,
     phone_hours_per_day: float = 0.0,
     laptop_hours_per_day: float = 0.0,
     desktop_hours_per_day: float = 0.0,
     tv_hours_per_day: float = 0.0,
-    shower_frequency: str = "daily",
+    shower_frequency: Literal["daily", "less_frequent", "twice_daily", "none"] = "daily",
     total_kwh_per_day: float = 0.0,
     flights_per_year: int = 0,
     avg_km_per_flight: float = 0.0,
     country: str = "india",
-    waste_bag_size: str = "medium",
+    waste_bag_size: Literal["small", "medium", "large", "extra large"] = "medium",
     waste_bags_per_week: float = 1.0,
     new_clothes_per_month: float = 2.0,
     grocery_bill_monthly: float = 200.0,
@@ -216,11 +227,13 @@ def predict_footprint(
     do any arithmetic yourself (no multiplying, adding, or averaging). This
     tool computes every derived quantity internally.
 
-    transport_type: car_petrol, car_diesel, car_ev, bus, train,
-                    flight_short, flight_long, motorcycle, bicycle, walking.
+    transport_type / food_type / energy_source / shower_frequency /
+    waste_bag_size: each is a single category label — pick exactly one
+                     value from that argument's allowed set. Do NOT invent
+                     extra fields per category (e.g. do not add a separate
+                     "bicycle" or "car_petrol" key) — set the one
+                     transport_type field to the matching value instead.
     km_per_day: distance traveled per day by transport_type.
-    food_type: beef, lamb, pork, chicken, fish, eggs, dairy,
-               rice, vegetables, fruits, legumes, nuts, grains.
     meals_with_this_food_per_week: how many times/week they eat food_type
                                     (0-7; "every day"=7, "once a week"=1).
                                     If food is mentioned with no frequency
@@ -230,11 +243,8 @@ def predict_footprint(
                             Leave at 0 and use meals_with_this_food_per_week
                             instead when they describe frequency, not a
                             quantity. Do not set both.
-    energy_source: coal, natural_gas, oil, solar, wind, hydro,
-                   nuclear, grid_india, grid_us, grid_eu.
     phone_hours_per_day / laptop_hours_per_day / desktop_hours_per_day /
     tv_hours_per_day: hours/day using that device (0 if not mentioned).
-    shower_frequency: one of daily, less_frequent, twice_daily, none.
     total_kwh_per_day: ONLY set this if the user states a specific total
                         daily electricity usage directly (e.g. "use 15
                         kWh/day" = 15). Leave at 0 and use the device-hour
@@ -244,7 +254,6 @@ def predict_footprint(
                        "2 round trips" = 2 — do not multiply by distance).
     avg_km_per_flight: typical distance of one flight in km.
     country: user country for live grid e.g. 'india', 'germany'.
-    waste_bag_size: small, medium, large, extra large.
     waste_bags_per_week: number of waste bags per week.
     new_clothes_per_month: number of new clothing items monthly.
     grocery_bill_monthly: monthly grocery spend USD equivalent.

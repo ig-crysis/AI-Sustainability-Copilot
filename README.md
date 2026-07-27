@@ -1,9 +1,9 @@
 # AI Sustainability Copilot
 
-A chat-based carbon footprint estimator: a LangGraph agent (Groq-hosted LLM)
-extracts lifestyle facts from natural language, calls a trained XGBoost
-regression model for the footprint estimate, and enriches it with live grid
-carbon-intensity data and country-level baselines.
+A chat-based carbon footprint estimator: a Groq-hosted LLM extracts lifestyle
+facts from natural language, calls a trained XGBoost regression model for the
+footprint estimate, and enriches it with live grid carbon-intensity data and
+country-level baselines.
 
 ## Architecture
 
@@ -11,7 +11,14 @@ carbon-intensity data and country-level baselines.
 frontend/  React + Vite chat UI (Vercel)
 backend/   FastAPI (Render)
   main.py             — /chat, /predict, /health routes
-  agent/carbon_agent.py — LangGraph ReAct agent (llama-3.1-8b-instant via Groq)
+  agent/carbon_agent.py — fixed 2-call pipeline (llama-3.1-8b-instant via Groq):
+                          one call extracts facts + calls predict_footprint,
+                          one synthesizes the final response. The 3 enrichment
+                          tools are deterministic lookups called directly in
+                          Python, not via LLM tool-choice — see the function's
+                          docstring for why (a prior ReAct-loop design made
+                          ~4-8 sequential LLM calls per request against a
+                          6000 TPM rate limit, taking 68-128s; this takes ~5s).
   agent/tools.py        — predict_footprint + 3 enrichment tools
   model/artifacts/      — trained XGBoost (best_model.pkl/.ubj) + RandomForest
   data/                 — raw survey dataset -> preprocessing -> train/test splits
@@ -82,23 +89,36 @@ version used IPCC as the primary predictor with XGBoost as a bounded ±15%
 adjustment, which scored R²=-73.8 on this same test set. See
 `research/LIMITATIONS.md` for that incident's full writeup.
 
-**Agent (LLM extraction) evaluation** — `backend/evaluate_agent.py`, 12
+**Agent (LLM extraction) evaluation** — `backend/evaluate_agent.py`, 14
 hand-authored natural-language test cases against the live Groq API
 (`llama-3.1-8b-instant`), re-run before citing since results can drift with
-model updates:
+model updates and the harness hits a non-deterministic live API:
 
 | Metric | Result |
 |---|---|
-| Tool-call errors (malformed function calls) | 0/12 |
-| Fully correct (all extracted fields match ground truth) | 10/12 (83.3%) |
-| Mean per-field extraction accuracy | 98.7% |
+| Tool-call errors (malformed function calls) | 1/14 (7.1%) |
+| Fully correct (all extracted fields match ground truth) | 8/14 (57.1%) |
+| Mean per-field extraction accuracy | 96.2% |
 
-An earlier tool design asked the LLM to pre-compute derived quantities
-itself (e.g. sum device-hours into a single `kwh_per_day`); that caused
-**11/12 (92%) of queries to fail outright** with a Groq `tool_use_failed`
-error, because the model would sometimes emit an unevaluated arithmetic
-expression instead of a number. Fixed by moving all arithmetic out of the
-LLM's responsibility into the tool itself — see `research/LIMITATIONS.md`.
+Two distinct `tool_use_failed` bugs have been found and fixed so far:
+1. An earlier tool design asked the LLM to pre-compute derived quantities
+   itself (e.g. sum device-hours into a single `kwh_per_day`); that caused
+   **11/12 (92%) of queries to fail outright**, because the model would
+   sometimes emit an unevaluated arithmetic expression instead of a number.
+   Fixed by moving all arithmetic out of the LLM's responsibility into the
+   tool itself.
+2. The tool's docstring listed each categorical field's valid values as
+   prose (e.g. "transport_type: car_petrol, car_diesel, ... bicycle,
+   walking"); the model would sometimes misread that list of *allowed
+   values* as separate *fields to fill in*, hallucinating extra keys like
+   `"bicycle": 0, "car_petrol": 0` alongside the real `transport_type`
+   argument. The resulting malformed call made Groq fall back to Llama's
+   native `<function=...>` text format, which is rejected outright. This
+   measured at **43% of queries** right after the pipeline rewrite below.
+   Fixed by declaring those fields as `Literal[...]` types (a real JSON
+   schema `enum` constraint, not prose) and running the extraction call at
+   `temperature=0` — dropped the failure rate to 7.1%. See
+   `research/LIMITATIONS.md` for the measurement history.
 
 ## Citations
 
