@@ -45,15 +45,17 @@ MODEL_NAME = "llama-3.1-8b-instant"  # must match agent/carbon_agent.py::build_a
 
 CATEGORICAL_FIELDS = ["transport_type", "food_type", "energy_source", "shower_frequency"]
 NUMERIC_FIELDS = [
-    "km_per_day", "meals_with_this_food_per_week",
+    "km_per_day", "meals_with_this_food_per_week", "total_kg_food_per_day",
     "phone_hours_per_day", "laptop_hours_per_day",
-    "desktop_hours_per_day", "tv_hours_per_day",
+    "desktop_hours_per_day", "tv_hours_per_day", "total_kwh_per_day",
     "flights_per_year", "avg_km_per_flight",
 ]
 ABS_TOL = {
     "km_per_day": 2.0, "meals_with_this_food_per_week": 0.5,
+    "total_kg_food_per_day": 0.05,
     "phone_hours_per_day": 0.5, "laptop_hours_per_day": 0.5,
     "desktop_hours_per_day": 0.5, "tv_hours_per_day": 0.5,
+    "total_kwh_per_day": 1.0,
     "flights_per_year": 0.4, "avg_km_per_flight": 250.0,
 }
 REL_TOL = 0.15
@@ -181,6 +183,33 @@ CASES = [
                       energy_source="grid_india", laptop_hours_per_day=3.0,
                       shower_frequency="daily",
                       flights_per_year=0, avg_km_per_flight=0.0, energy_efficient=True),
+    ),
+    dict(
+        # Regression test for a live production bug: user states a total
+        # daily kWh directly, and mentions food with no explicit frequency.
+        # Before the fix, the direct kWh statement was silently dropped
+        # (no field existed to carry it), and ambiguous food defaulted to
+        # kg=0 instead of assuming daily. See research/LIMITATIONS.md.
+        id="direct_kwh_stated_and_ambiguous_food_frequency",
+        query=("I drive a petrol car 30km daily, eat chicken, use 15kWh/day "
+               "in India. What's my footprint?"),
+        expected=dict(transport_type="car_petrol", km_per_day=30.0,
+                      food_type="chicken", meals_with_this_food_per_week=7,
+                      energy_source="grid_india", total_kwh_per_day=15.0,
+                      flights_per_year=0, avg_km_per_flight=0.0, energy_efficient=False),
+    ),
+    dict(
+        # Regression test: user states an exact food quantity instead of a
+        # frequency — should route to total_kg_food_per_day, not be forced
+        # through the meals-per-week model.
+        id="direct_food_quantity_stated",
+        query=("I take the bus 20km a day. I eat 300g of rice daily. Wind "
+               "power at home, laptop 3 hours a day, shower daily. No flights."),
+        expected=dict(transport_type="bus", km_per_day=20.0,
+                      food_type="rice", total_kg_food_per_day=0.3,
+                      energy_source="wind", laptop_hours_per_day=3.0,
+                      shower_frequency="daily",
+                      flights_per_year=0, avg_km_per_flight=0.0, energy_efficient=False),
     ),
     dict(
         id="two_flights_stated",

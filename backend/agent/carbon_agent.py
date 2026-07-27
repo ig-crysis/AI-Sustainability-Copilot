@@ -46,13 +46,22 @@ CRITICAL RULES for calling predict_footprint:
 - If the user did NOT mention a vehicle, set transport_type="bicycle" and
   km_per_day=0
 - meals_with_this_food_per_week is a plain count 0-7 ("once a week"=1,
-  "twice a week"=2, "every day"=7) — do not convert this to kg yourself
+  "twice a week"=2, "every day"=7) — do not convert this to kg yourself.
+  If food is mentioned but no frequency is stated (e.g. "I eat chicken"),
+  assume 7 (daily) — that is the natural reading, not "not mentioned"
+- If the user states an exact food quantity instead of a frequency (e.g.
+  "200g of rice a day"), pass it directly as total_kg_food_per_day (in kg)
+  and leave meals_with_this_food_per_week=0 — do not use both for the same
+  food
 - flights_per_year is a plain count of flights/trips — do not multiply by
   distance yourself; pass the distance separately as avg_km_per_flight
 - Device hours (phone/laptop/desktop/tv_hours_per_day) and
   shower_frequency (daily/less_frequent/twice_daily/none) are passed as-is;
   default all device hours to 0 and shower_frequency to "daily" if not
   mentioned
+- If the user states a specific total daily electricity usage directly
+  (e.g. "use 15 kWh/day"), pass that number as total_kwh_per_day and leave
+  all device-hour fields at 0 — do NOT also guess device hours in that case
 - NEVER assume or hallucinate values the user did not provide
 
 LIFESTYLE FEATURE RULES (extract if mentioned):

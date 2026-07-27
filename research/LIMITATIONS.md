@@ -23,6 +23,24 @@ system changes.
   `predict_footprint`'s signature to accept only atomic facts (device
   hours, meal frequency, shower category) and moving all arithmetic into
   Python inside the tool. See `backend/evaluate_agent.py`.
+- **`TRAINING_RANGES` in-distribution guard was badly wrong for
+  `kwh_per_day`.** The out-of-range fallback (route to the IPCC formula
+  when an input isn't like anything the model was trained on) used a
+  hardcoded bound of (0, 20.0), but the real training data's `kwh_per_day`
+  ranges only 2.56–6.44 (computed directly from
+  `data/processed/real_carbon_data_v2.csv`; this column is derived from
+  device+shower hours in preprocessing, not a full household electricity
+  bill, so it's a narrow feature by construction). A real query like "use
+  15 kWh/day" passed the broken check as "in range," got a nonsensical
+  XGBoost extrapolation (~119 kg), further compounded by the live-grid
+  delta, landing at 68 kg/month — versus the IPCC fallback's ~492 kg, which
+  is in the right ballpark against an independent estimate (~447 kg from a
+  general-purpose LLM asked the same question). All five `TRAINING_RANGES`
+  bounds have been recomputed from the actual processed dataset rather than
+  guessed; see the comment above the constant in `agent/tools.py`. Practical
+  implication: most direct household-kWh statements will now legitimately
+  route to the IPCC fallback rather than XGBoost — this is correct given
+  the feature's narrow training range, not a regression.
 
 ## Open limitations
 
@@ -46,6 +64,15 @@ system changes.
   `"lpg"` vehicles both map to `car_petrol`; `"wood"` heating maps to
   `coal`). This is a legitimate simplification but a real source of label
   noise in training data.
+- **The in-range check is a single AND-gate across all 5 features.** If
+  any one of km_per_day/kg_food_per_day/kwh_per_day/flights_per_year/
+  flight_km_total falls outside its training range, the *entire* prediction
+  falls back to the IPCC formula, even if the other four features are
+  well within range. Given `kwh_per_day`'s narrow real range (see above),
+  this means many otherwise-normal queries with slightly elevated energy
+  use will fall back to the physical formula rather than a per-feature
+  fallback. Not fixed in this pass — a more granular per-feature confidence
+  model would be a reasonable follow-up.
 - **No external validation.** No comparison against an established
   third-party carbon calculator, and no user study on whether the agent's
   suggestions are perceived as accurate or useful.

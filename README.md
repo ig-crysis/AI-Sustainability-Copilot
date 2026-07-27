@@ -19,16 +19,22 @@ backend/   FastAPI (Render)
 
 **Prediction pipeline** (`agent/tools.py::predict_footprint`): the LLM
 extracts only atomic facts from the user's message (a distance, a device's
-daily usage hours, a meal frequency, a category label) — it does no
-arithmetic. The tool itself:
+daily usage hours, a meal frequency, a category label, or — when the user
+states one directly — a total daily kWh/kg figure) — it does no arithmetic.
+The tool itself:
 1. Computes derived quantities (`kg_food_per_day`, `kwh_per_day`,
    `flight_km_total`) from those atomic facts.
 2. Runs the XGBoost model (trained directly on real survey data) as the
-   primary footprint estimate.
+   primary footprint estimate, gated by an in-training-distribution check
+   (`TRAINING_RANGES`, computed from the actual processed dataset).
 3. Corrects for real-time electricity grid carbon intensity (via
    Electricity Maps, with a static fallback) as an additive delta.
-4. Falls back to an IPCC/Poore & Nemecek physical formula only when inputs
-   fall outside the model's training distribution.
+4. Falls back to an IPCC/Poore & Nemecek physical formula whenever any
+   input falls outside the model's training distribution — `kwh_per_day`'s
+   real training range is narrow (2.56–6.44, since it's derived from
+   device+shower hours, not a full household bill), so most directly-stated
+   household kWh figures legitimately route here rather than through
+   XGBoost.
 
 The IPCC/Poore & Nemecek formula is also used to produce the illustrative
 per-category breakdown (transport/food/energy/flights/waste/clothing) shown

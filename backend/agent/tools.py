@@ -81,12 +81,21 @@ BASE_HOUSEHOLD_KWH = 2.0
 MEAL_KG = 0.15  # standard meal portion
 
 # ── Training distribution ranges ─────────────────────────────────────────────
+# Computed from data/processed/real_carbon_data_v2.csv (actual min/max per
+# column), NOT hand-guessed — a previous hardcoded kwh_per_day upper bound
+# of 20.0 (vs. the real 6.44) let wildly out-of-distribution inputs like
+# "15 kWh/day" pass the in-range check and get an unreliable XGBoost
+# extrapolation instead of falling back to the IPCC formula. Note
+# kwh_per_day's real range is narrow because it's derived from device+
+# shower hours in preprocessing, not a full household electricity bill —
+# most direct kWh statements from real users will legitimately exceed it
+# and should fall back to the physical formula; that's by design, not a bug.
 TRAINING_RANGES = {
-    "km_per_day":       (0.0,  400.0),
-    "kg_food_per_day":  (0.0,    0.6),
-    "kwh_per_day":      (0.0,   20.0),
-    "flights_per_year": (0,       10),
-    "flight_km_total":  (0,    20000),
+    "km_per_day":       (0.0,   335.0),
+    "kg_food_per_day":  (0.0,     0.9),
+    "kwh_per_day":      (0.0,     6.5),
+    "flights_per_year": (0,         8),
+    "flight_km_total":  (0,     16000),
 }
 
 # ── Country mappings ─────────────────────────────────────────────────────────
@@ -180,11 +189,13 @@ def predict_footprint(
     food_type: str,
     meals_with_this_food_per_week: float,
     energy_source: str,
+    total_kg_food_per_day: float = 0.0,
     phone_hours_per_day: float = 0.0,
     laptop_hours_per_day: float = 0.0,
     desktop_hours_per_day: float = 0.0,
     tv_hours_per_day: float = 0.0,
     shower_frequency: str = "daily",
+    total_kwh_per_day: float = 0.0,
     flights_per_year: int = 0,
     avg_km_per_flight: float = 0.0,
     country: str = "india",
@@ -212,11 +223,23 @@ def predict_footprint(
                rice, vegetables, fruits, legumes, nuts, grains.
     meals_with_this_food_per_week: how many times/week they eat food_type
                                     (0-7; "every day"=7, "once a week"=1).
+                                    If food is mentioned with no frequency
+                                    given, assume 7 (daily).
+    total_kg_food_per_day: ONLY set this if the user states an exact daily
+                            food quantity (e.g. "200g of rice a day" = 0.2).
+                            Leave at 0 and use meals_with_this_food_per_week
+                            instead when they describe frequency, not a
+                            quantity. Do not set both.
     energy_source: coal, natural_gas, oil, solar, wind, hydro,
                    nuclear, grid_india, grid_us, grid_eu.
     phone_hours_per_day / laptop_hours_per_day / desktop_hours_per_day /
     tv_hours_per_day: hours/day using that device (0 if not mentioned).
     shower_frequency: one of daily, less_frequent, twice_daily, none.
+    total_kwh_per_day: ONLY set this if the user states a specific total
+                        daily electricity usage directly (e.g. "use 15
+                        kWh/day" = 15). Leave at 0 and use the device-hour
+                        fields instead when they describe usage by device.
+                        Do not set both.
     flights_per_year: number of flights taken per year (a plain count, e.g.
                        "2 round trips" = 2 — do not multiply by distance).
     avg_km_per_flight: typical distance of one flight in km.
@@ -236,18 +259,25 @@ def predict_footprint(
     energy_eff_val       = 1.0 if energy_efficient else 0.0
 
     # ── Arithmetic the LLM used to be asked to do — now computed here ────────
-    kg_food_per_day = round(
-        max(min(meals_with_this_food_per_week, 7.0), 0.0) / 7.0 * MEAL_KG, 4
-    )
-    kwh_per_day = round(
-        phone_hours_per_day * DEVICE_KWH_PER_HR["phone"]
-        + laptop_hours_per_day * DEVICE_KWH_PER_HR["laptop"]
-        + desktop_hours_per_day * DEVICE_KWH_PER_HR["desktop"]
-        + tv_hours_per_day * DEVICE_KWH_PER_HR["tv"]
-        + SHOWER_KWH.get(shower_frequency.lower(), 0.9)
-        + BASE_HOUSEHOLD_KWH,
-        3,
-    )
+    if total_kg_food_per_day > 0:
+        kg_food_per_day = round(total_kg_food_per_day, 4)
+    else:
+        kg_food_per_day = round(
+            max(min(meals_with_this_food_per_week, 7.0), 0.0) / 7.0 * MEAL_KG, 4
+        )
+
+    if total_kwh_per_day > 0:
+        kwh_per_day = round(total_kwh_per_day, 3)
+    else:
+        kwh_per_day = round(
+            phone_hours_per_day * DEVICE_KWH_PER_HR["phone"]
+            + laptop_hours_per_day * DEVICE_KWH_PER_HR["laptop"]
+            + desktop_hours_per_day * DEVICE_KWH_PER_HR["desktop"]
+            + tv_hours_per_day * DEVICE_KWH_PER_HR["tv"]
+            + SHOWER_KWH.get(shower_frequency.lower(), 0.9)
+            + BASE_HOUSEHOLD_KWH,
+            3,
+        )
     flight_km_total = float(flights_per_year) * float(avg_km_per_flight)
 
     zone          = COUNTRY_ZONE.get(country.lower(), "IN")
