@@ -92,6 +92,16 @@ numbers below are from the held-out test set, 2,000 rows, 80/20 split,
 | RandomForest | 27.47 | 0.80 |
 | **XGBoost (deployed primary)** | **25.30** | **0.83** (95% CI [0.81, 0.84]) |
 
+**Second important caveat**: the table above scores XGBoost against
+held-out rows drawn from the training distribution, so it is (by
+construction) almost always "in range." On realistic user queries, it
+isn't: `backend/evaluate_routing.py` samples 300 randomly-generated
+realistic scenarios (not dataset rows) and finds XGBoost only fires on
+**29.7%** of them — the other 70.3% silently fall back to the IPCC
+formula, which is the same formula shown above scoring R²=-56. See
+`research/LIMITATIONS.md` for the full numbers, including how much
+XGBoost and IPCC disagree with each other on the cases where both apply.
+
 The IPCC-only row is intentionally kept in the table: an earlier production
 version used IPCC as the primary predictor with XGBoost as a bounded ±15%
 adjustment, which scored R²=-73.8 on this same test set. See

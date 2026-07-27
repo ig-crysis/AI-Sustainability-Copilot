@@ -101,15 +101,37 @@ system changes.
   `"lpg"` vehicles both map to `car_petrol`; `"wood"` heating maps to
   `coal`). This is a legitimate simplification but a real source of label
   noise in training data.
-- **The in-range check is a single AND-gate across all 5 features.** If
-  any one of km_per_day/kg_food_per_day/kwh_per_day/flights_per_year/
-  flight_km_total falls outside its training range, the *entire* prediction
-  falls back to the IPCC formula, even if the other four features are
-  well within range. Given `kwh_per_day`'s narrow real range (see above),
-  this means many otherwise-normal queries with slightly elevated energy
-  use will fall back to the physical formula rather than a per-feature
-  fallback. Not fixed in this pass — a more granular per-feature confidence
-  model would be a reasonable follow-up.
+- **Measured (2026-07-28, `backend/evaluate_routing.py`): XGBoost — the
+  "primary, R²=0.83" model — only fires on ~30% of realistic queries, and
+  disagrees sharply with the IPCC fallback on the rest of the cases where
+  both are computable. This is arguably the single most important open
+  limitation for the paper, more consequential than a citation gap.** The
+  in-range check is a single AND-gate across all 5 features
+  (km_per_day/kg_food_per_day/kwh_per_day/flights_per_year/flight_km_total)
+  — if any one falls outside its training range, the *entire* prediction
+  falls back to the IPCC formula, even if the other four are well within
+  range. Over 300 randomly-sampled realistic scenarios (not dataset rows —
+  see the script for the sampling procedure): **only 89/300 (29.7%)
+  actually routed through XGBoost; 211/300 (70.3%) fell back to IPCC.**
+  That fallback is the same IPCC formula already shown (see "Production
+  formula was miscalibrated" above) to score R²=-56 to -73.8 against this
+  project's own held-out synthetic target — i.e. the method used on the
+  *majority* of realistic queries is one already demonstrated to be worse
+  than predicting the mean. Of the fallback cases, `kwh_per_day` was the
+  single biggest blocker (55.0% of out-of-range scenarios) as previously
+  known, but `flight_km_total` (36.5%) and `kg_food_per_day` (29.9%) are
+  comparably large, previously-unmeasured contributors. **Separately, among
+  the 89 scenarios where XGBoost *did* fire, it disagreed with the IPCC
+  estimate on the same inputs by a mean of 609 kg CO2/month (68.7%
+  relative; XGBoost averaged 170 kg/month vs. IPCC's 754 kg/month on the
+  same scenarios), with 82% of those scenarios differing by more than
+  50%.** This is not a ground-truth comparison — both methods are
+  estimating the same synthetic-target-fit quantity differently — but it
+  quantifies how much the routing gate's binary in/out-of-range decision
+  swings the number a user actually sees, with no uncertainty indication
+  surfaced to them either way. Not fixed in this pass — a more granular
+  per-feature confidence model, or surfacing the disagreement/uncertainty
+  to the user, would be reasonable follow-ups.
 - **No external validation.** No comparison against an established
   third-party carbon calculator, and no user study on whether the agent's
   suggestions are perceived as accurate or useful.
