@@ -218,8 +218,8 @@ def predict_footprint(
 ) -> dict:
     """
     Predict monthly carbon footprint (kg CO2) using a hybrid pipeline:
-    XGBoost (trained directly on real survey data, R²=0.83) as the primary
-    predictor, corrected for real-time grid carbon intensity. IPCC/Poore &
+    XGBoost (trained on a synthetically-generated dataset, R²=0.83) as the
+    primary predictor, corrected for real-time grid carbon intensity. IPCC/Poore &
     Nemecek emission factors are used only for the explanatory per-category
     breakdown shown to the user, not for the total.
 
@@ -305,8 +305,9 @@ def predict_footprint(
     ipcc_total    = max(transport_co2 + food_co2 + energy_co2 +
                         flight_co2 + waste_co2 + clothing_co2, 0)
 
-    # XGBoost — primary predictor, trained directly on real survey data
-    # (R²=0.83 on held-out test set; see backend/evaluate_ablation.py).
+    # XGBoost — primary predictor, trained on a synthetically-generated
+    # dataset (R²=0.83 on held-out test set; see backend/evaluate_ablation.py
+    # and research/LIMITATIONS.md for what that R² does/doesn't validate).
     # It cannot see live grid intensity, so we correct its output with the
     # delta between live and the category's training-time baseline intensity.
     ml_pred_kg = None
@@ -384,7 +385,7 @@ def predict_footprint(
             "clothing_kg":  round(clothing_co2, 2),
         },
         "data_sources": {
-            "primary":   (f"XGBoost trained on real survey data (R²=0.83)"
+            "primary":   (f"XGBoost trained on a synthetic carbon-footprint dataset (R²=0.83)"
                           if ml_pred_kg is not None else
                           "IPCC AR6 + Poore & Nemecek 2018 (ML out of training range)"),
             "breakdown": "IPCC AR6 + Poore & Nemecek 2018 emission factors (illustrative, per-category)",

@@ -38,7 +38,7 @@ def evaluate(model, X_test, y_test, name):
 
 
 def run():
-    print("[INFO] Loading real dataset...")
+    print("[INFO] Loading dataset...")
     X_train, X_test, y_train, y_test = load_data()
     print(f"[INFO] Train: {X_train.shape} | Test: {X_test.shape}")
     print(f"[INFO] Target range: {y_train.min():.1f} – {y_train.max():.1f} kg CO2/month")

@@ -1,9 +1,9 @@
 """
 Hybrid Fusion Layer
 ===================
-Combines XGBoost ML prediction (trained on real data) with
-live carbon intensity from Electricity Maps API to produce
-a calibrated, real-world CO2 estimate.
+Combines XGBoost ML prediction (trained on a synthetically-generated
+dataset — see research/LIMITATIONS.md) with live carbon intensity from
+Electricity Maps API to produce a calibrated CO2 estimate.
 
 IEEE Novelty: Static ML baseline × dynamic grid adjustment
 = more accurate than either alone.

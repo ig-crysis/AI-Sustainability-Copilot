@@ -3,7 +3,7 @@
 ## Pipeline (what actually feeds the deployed model)
 
 ```
-data/raw/Carbon_Emission.csv          (raw survey dataset, ground-truth CarbonEmission column)
+data/raw/Carbon_Emission.csv          (synthetically-generated dataset, CarbonEmission target)
         │
         ▼  data_preprocessing.py (see map_row())
 data/processed/real_carbon_data_v2.csv   (mapped features + monthly_co2_kg target)
@@ -16,16 +16,28 @@ data/processed/encoders.pkl, scaler.pkl
 model/artifacts/xgboost_model.pkl, rf_model.pkl, best_model.pkl (+ .ubj native copy)
 ```
 
-The deployed model (`agent/tools.py::predict_footprint`) is XGBoost, trained
-directly on the real `CarbonEmission` target from this dataset — it is not
-fit to any formula-generated target. See `backend/evaluate_ablation.py` for
-held-out test-set performance (R²≈0.83).
+**Correction (2026-07-28): this dataset is synthetic, not real survey data —
+despite the `real_carbon_data_v2.csv` filename and prior wording throughout
+this codebase claiming otherwise.** Per the dataset's own Kaggle listing
+(see citation below): *"The data has been synthetically generated,
+calculated based on weightings from various studies and sites that
+currently compute the dependent variable, carbon emissions, attempting to
+maintain values close to reality."* The `CarbonEmission` target is
+therefore itself a formula/weighting-based construction, not measured
+real-world emissions. The deployed model (`agent/tools.py::predict_footprint`)
+is XGBoost fit to this synthetic target — see `backend/evaluate_ablation.py`
+for held-out test-set performance (R²≈0.83) **against that synthetic
+target**, not against independently-verified real-world footprints. This
+materially changes what the R² claim means for a paper: it measures how
+well XGBoost recovers the dataset creators' weighting formula from the
+input features, not real-world predictive accuracy. See
+`research/LIMITATIONS.md` for the full implication.
 
 ## File-by-file status
 
 | File | Status | Notes |
 |---|---|---|
-| `data/raw/Carbon_Emission.csv` | **Active — primary training data** | 10,000-row individual/household carbon footprint survey dataset. **TODO(user): fill in the exact source URL, author, and license** — this repo's `data/raw/` is gitignored (not committed), so anyone reproducing this pipeline needs the original download link. If this is a Kaggle dataset, cite it by its Kaggle listing (dataset name + author + URL) in the root `README.md` citations section once confirmed. |
+| `data/raw/Carbon_Emission.csv` | **Active — primary training data** | 10,000-row **synthetically-generated** individual carbon footprint dataset (confirmed via the dataset's Kaggle page, not real survey responses — see correction above). **Citation**: "Individual Carbon Footprint Calculation", Mesut Duman and 4 collaborators, Kaggle, https://www.kaggle.com/datasets/dumanmesut/individual-carbon-footprint-calculation, License: CC0: Public Domain. Also cited in the root `README.md` citations section. |
 | `data/raw/Food_Product_Emissions.csv` | Referenced by `food_ef_real.pkl` generation | Confirm and cite source (looks derived from Poore & Nemecek 2018, already cited elsewhere in the code, but verify this specific file matches that source before citing it as such in a paper). |
 | `data/raw/owid_co2.csv` | **Active** | Read directly by `precompute_owid.py` to build `data/processed/owid_baselines.pkl` (regional per-capita baselines used by `get_regional_baseline`). Source: Our World in Data CO2 dataset. |
 | `data/raw/owid-co2-data.csv` | Unused duplicate | Same OWID dataset, different filename, not read by any script (`precompute_owid.py` hardcodes `owid_co2.csv`). Delete to avoid the "which one is real" ambiguity, or note explicitly if it's kept as a raw-download reference copy. |

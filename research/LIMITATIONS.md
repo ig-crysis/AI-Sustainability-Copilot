@@ -117,16 +117,43 @@ system changes.
   files (`rf_model.pkl`, `xgboost_model.pkl`) are gitignored — not
   committed. The deployed model (`best_model.pkl`/`.ubj`) is committed and
   the app runs out of the box, but reproducing the *training* pipeline from
-  a fresh clone currently requires manually sourcing the raw dataset with
-  no documented download link. See `backend/data/README.md` (has an open
-  TODO for the exact dataset citation).
-- **Dataset provenance not yet cited.** The primary training dataset
-  (`backend/data/raw/Carbon_Emission.csv`) needs its exact source, author,
-  and license confirmed and cited before publication — flagged as a TODO in
-  `backend/data/README.md`.
+  a fresh clone currently requires manually sourcing the raw dataset. See
+  `backend/data/README.md` for the confirmed download link/citation.
+- **The primary training dataset's target column is synthetically
+  generated, not measured real-world data — this is the most important
+  limitation for the paper's Methods section, more so than a citation gap.**
+  Confirmed directly on the dataset's Kaggle listing (2026-07-28):
+  "Individual Carbon Footprint Calculation" by Mesut Duman and 4
+  collaborators, https://www.kaggle.com/datasets/dumanmesut/individual-carbon-footprint-calculation,
+  License: CC0: Public Domain. The listing itself states: *"The data has
+  been synthetically generated, calculated based on weightings from
+  various studies and sites that currently compute the dependent variable,
+  carbon emissions, attempting to maintain values close to reality."* This
+  directly contradicts prior wording throughout this codebase and docs
+  (the filename `real_carbon_data_v2.csv`, and phrases like "trained
+  directly on real survey data" previously in `README.md`,
+  `backend/data/README.md`, `agent/tools.py`'s docstring/comments/API
+  response text, `agent/fusion.py`, and `evaluate_ablation.py`) — all now
+  corrected to describe the dataset as synthetic. **Practical implication
+  for how to interpret the reported R²=0.83**: it measures how well
+  XGBoost recovers the dataset creators' unpublished weighting
+  formula/heuristic from the input features, not real-world predictive
+  accuracy against independently-measured footprints. The model could be
+  a very accurate emulator of that formula and still diverge meaningfully
+  from real emissions if the formula's weightings are themselves
+  inaccurate approximations (their own listing hedges this: "attempting
+  to maintain values close to reality," not validated against real
+  measurements). This should be stated plainly and early in the paper's
+  Methods/Data section, not left implicit — a reviewer who discovers the
+  Kaggle listing's synthetic-data disclosure independently, after reading
+  a paper that implies real survey data, would reasonably read that as a
+  methodological misrepresentation.
 - **Unused/dead artifacts found during this pass, not yet cleaned up:**
   `agent/tools.py` defines `IGES_PATH` pointing at
-  `data/raw/IGES_GHG_Emissions_DB.xlsx` but never reads it, and
-  `data/raw/owid-co2-data.csv` is an unused duplicate of `owid_co2.csv`.
-  Harmless to the running system but worth resolving so the repo doesn't
-  imply data sources that aren't actually used.
+  `data/raw/IGES_GHG_Emissions_DB.xlsx` but never reads it,
+  `data/raw/owid-co2-data.csv` is an unused duplicate of `owid_co2.csv`,
+  and `agent/fusion.py` (a "Hybrid Fusion Layer" module) is not imported
+  anywhere in the running application — `main.py` and `agent/tools.py`
+  implement the actual fusion logic directly. Harmless to the running
+  system but worth resolving so the repo doesn't imply data sources or
+  modules that aren't actually used.

@@ -4,8 +4,11 @@ Ablation study for the DEPLOYED prediction formula.
 This script benchmarks the exact hybrid formula that runs in production
 (agent/tools.py::predict_footprint):
 
-    xgb_pred     = XGBoost prediction, trained directly on real survey
-                   data (primary estimate; R²=0.83 on held-out test set)
+    xgb_pred     = XGBoost prediction, trained on a synthetically-generated
+                   dataset (primary estimate; R²=0.83 on held-out test set
+                   -- see research/LIMITATIONS.md for what this R² does and
+                   does not validate, since the dataset's target column is
+                   itself formula-generated, not measured)
     energy_delta = kwh_per_day * 30 * (live_grid_ef - baseline_grid_ef)
     final        = xgb_pred + energy_delta        (in-range inputs)
     final        = ipcc_total                     (out-of-range fallback,
