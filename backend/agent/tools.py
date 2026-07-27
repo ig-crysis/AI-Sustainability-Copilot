@@ -184,11 +184,11 @@ def _check_in_training_range(km_per_day, kg_food_per_day,
 # ────────────────────────────────────────────────────────────────────────────
 @tool
 def predict_footprint(
-    transport_type: str,
-    km_per_day: float,
-    food_type: str,
-    meals_with_this_food_per_week: float,
-    energy_source: str,
+    transport_type: str = "bicycle",
+    km_per_day: float = 0.0,
+    food_type: str = "vegetables",
+    meals_with_this_food_per_week: float = 0.0,
+    energy_source: str = "grid_india",
     total_kg_food_per_day: float = 0.0,
     phone_hours_per_day: float = 0.0,
     laptop_hours_per_day: float = 0.0,
