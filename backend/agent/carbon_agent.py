@@ -5,8 +5,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage
-from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from agent.tools import (
     predict_footprint,
@@ -19,19 +18,9 @@ from agent.tools import (
 
 load_dotenv()
 
-TOOLS = [
-    predict_footprint,
-    get_live_carbon_intensity,
-    compare_transport_scenarios,
-    get_regional_baseline,
-]
-
-SYSTEM_PROMPT = """You are an expert AI sustainability copilot. Your role is to:
-1. Accurately estimate carbon footprints using the predict_footprint tool
-2. Enrich predictions with live carbon intensity data via get_live_carbon_intensity
-3. Compare transport alternatives using compare_transport_scenarios
-4. Provide regional context using get_regional_baseline
-5. Always give specific, quantified, actionable suggestions
+EXTRACTION_SYSTEM_PROMPT = """You are an expert AI sustainability copilot. Your only job right now is to
+extract structured facts from the user's message and call predict_footprint
+with them — do not write any explanation or commentary, just call the tool.
 
 CRITICAL RULES for calling predict_footprint:
 - ONLY extract raw facts the user explicitly mentioned — NEVER compute,
@@ -62,6 +51,8 @@ CRITICAL RULES for calling predict_footprint:
 - If the user states a specific total daily electricity usage directly
   (e.g. "use 15 kWh/day"), pass that number as total_kwh_per_day and leave
   all device-hour fields at 0 — do NOT also guess device hours in that case
+- country: extract the user's country if mentioned (e.g. "india",
+  "germany"); default "india" if not mentioned
 - NEVER assume or hallucinate values the user did not provide
 
 LIFESTYLE FEATURE RULES (extract if mentioned):
@@ -72,16 +63,29 @@ LIFESTYLE FEATURE RULES (extract if mentioned):
 - Energy efficiency: energy_efficient=true only if user explicitly says
   they use LED bulbs, efficient appliances, or similar
 
-Workflow for every query:
-- ALWAYS call predict_footprint first to get the ML model estimate
-- Then call relevant enrichment tools based on user context
-- Synthesize all tool outputs into a clear structured response
-- Always quantify savings: "switching to train saves X kg CO2/month"
-- Compare user footprint to regional average when country is known
-- Rate footprint: Low/Moderate/High/Critical (global avg = 375 kg/month)
-- Clearly state which data points were assumed vs explicitly provided
+ALWAYS call predict_footprint, even if the message is vague — use the
+defaults above for anything not mentioned."""
 
-Be precise, empathetic, and solution-focused."""
+SYNTHESIS_SYSTEM_PROMPT = """You are an expert AI sustainability copilot. The user's carbon footprint has
+already been computed for you (via a hybrid XGBoost + IPCC model) along with
+supporting context — live grid carbon intensity, a transport-mode comparison,
+and a regional per-capita baseline. Your only job is to write the natural-
+language response using EXACTLY the numbers given below — do not recompute,
+re-estimate, or contradict any of them.
+
+Response requirements:
+- State their monthly footprint in kg CO2 and, when a regional baseline is
+  available, compare it to that baseline.
+- Follow the THRESHOLD instruction given to you exactly — it tells you
+  whether to congratulate, give gentle tips, give full suggestions, or use
+  urgent language. Do not contradict it.
+- When giving reduction suggestions, quantify them using the transport
+  comparison data provided where relevant (e.g. "switching to train saves
+  X kg CO2/month").
+- Briefly note which inputs were assumed (defaults for anything the user
+  didn't mention) vs explicitly stated, if it's relevant context.
+- Be precise, empathetic, and solution-focused. Keep it concise — a few
+  short paragraphs, not a report."""
 
 
 def get_threshold_instruction(monthly_co2: float) -> str:
@@ -114,83 +118,110 @@ def get_threshold_instruction(monthly_co2: float) -> str:
         )
 
 
-def build_agent():
-    llm = ChatGroq(
+def _build_llm():
+    return ChatGroq(
         model="llama-3.1-8b-instant",
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=0.2,
     )
-    return create_react_agent(
-        model=llm,
-        tools=TOOLS,
-        prompt=SYSTEM_PROMPT,
-    )
 
 
 def run_agent(user_message: str, chat_history: list = None) -> dict:
-    """Run the agent with threshold-aware suggestions."""
+    """
+    Run the agent in exactly two LLM calls: one to extract structured facts
+    and call predict_footprint, one to synthesize the final response from
+    the (already-known-correct) tool results and threshold.
+
+    This replaces an earlier design that let the LLM freely choose among 4
+    tools in a ReAct loop (~4 sequential LLM calls) and then, if the
+    resulting text didn't match the actual threshold, re-ran the whole loop
+    a second time based on a keyword-matching heuristic (up to ~8 calls
+    worst case). Each call resends the full system prompt + tool schemas +
+    conversation history, and this Groq API key is rate-limited to 6000
+    tokens/minute — a single chat request could exhaust that budget within
+    1-2 calls, triggering silent 429-retry-with-backoff waits of 20-35s+
+    per call (confirmed via HTTP-level tracing; see research/LIMITATIONS.md).
+    Fixing the threshold from the actual model output before generating any
+    text also makes the old rerun heuristic unnecessary, not just slower.
+    """
     if chat_history is None:
         chat_history = []
 
-    # ── Step 1: Run agent WITHOUT threshold instruction first ────────────────
-    agent    = build_agent()
-    messages = chat_history + [HumanMessage(content=user_message)]
-    result   = agent.invoke({"messages": messages})
+    llm = _build_llm()
 
-    all_messages   = result["messages"]
-    final_response = ""
-    steps          = []
-    actual_monthly_co2 = None
+    # ── Call 1 of 2: extract structured facts and call predict_footprint ────
+    extraction_llm = llm.bind_tools([predict_footprint])
+    messages = (
+        [SystemMessage(content=EXTRACTION_SYSTEM_PROMPT)]
+        + chat_history
+        + [HumanMessage(content=user_message)]
+    )
+    ai_msg = extraction_llm.invoke(messages)
 
-    for msg in all_messages:
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                steps.append({
-                    "tool":  tc["name"],
-                    "input": tc["args"],
-                })
-        if msg.__class__.__name__ == "AIMessage":
-            if isinstance(msg.content, str) and msg.content.strip():
-                final_response = msg.content
+    tool_call = next(
+        (tc for tc in (ai_msg.tool_calls or []) if tc["name"] == "predict_footprint"),
+        None,
+    )
 
-    # ── Step 2: Extract actual CO2 from predict_footprint tool call ──────────
-    for step in steps:
-        if step["tool"] == "predict_footprint":
-            try:
-                from agent.tools import predict_footprint
-                import xgboost as xgb
-                pred_result = predict_footprint.invoke(step["input"])
-                actual_monthly_co2 = pred_result.get("predicted_monthly_co2_kg", None)
-            except Exception:
-                pass
-            break
+    if tool_call is None:
+        # Model declined to call the tool (e.g. an off-topic message) —
+        # nothing to synthesize against, just return what it said.
+        return {
+            "output":    ai_msg.content if isinstance(ai_msg.content, str) else "",
+            "steps":     [],
+            "threshold": "UNKNOWN",
+            "actual_co2": None,
+        }
 
-    # ── Step 3: Determine threshold from ACTUAL model output ─────────────────
-    threshold_instruction = ""
-    if actual_monthly_co2 is not None:
-        threshold_instruction = get_threshold_instruction(actual_monthly_co2)
+    steps = [{"tool": "predict_footprint", "input": tool_call["args"]}]
 
-        # ── Step 4: If threshold says LOW but response gives suggestions,
-        #    re-run agent with correct threshold injected ─────────────────────
-        threshold_level = threshold_instruction.split(".")[0]
-        needs_rerun = False
+    try:
+        pred_result = predict_footprint.invoke(tool_call["args"])
+    except Exception:
+        pred_result = {}
+    actual_monthly_co2 = pred_result.get("predicted_monthly_co2_kg")
 
-        if threshold_level == "THRESHOLD: LOW" and any(
-            phrase in final_response.lower()
-            for phrase in ["consider", "reduce", "switch", "suggestion", "recommend"]
-        ):
-            needs_rerun = True
-        elif threshold_level == "THRESHOLD: CRITICAL" and "congratulat" in final_response.lower():
-            needs_rerun = True
+    # ── Deterministic enrichment — no LLM judgment needed for these, so no
+    #    reason to spend a tool-choice round trip on each one ───────────────
+    country     = tool_call["args"].get("country", "india")
+    km_per_day  = tool_call["args"].get("km_per_day", 0.0)
 
-        if needs_rerun:
-            augmented = f"{user_message}\n\n[SYSTEM NOTE: {threshold_instruction}]"
-            messages2 = chat_history + [HumanMessage(content=augmented)]
-            result2   = build_agent().invoke({"messages": messages2})
-            for msg in result2["messages"]:
-                if msg.__class__.__name__ == "AIMessage":
-                    if isinstance(msg.content, str) and msg.content.strip():
-                        final_response = msg.content
+    live_intensity = get_live_carbon_intensity.invoke({"country": country})
+    steps.append({"tool": "get_live_carbon_intensity", "input": {"country": country}})
+
+    transport_compare = compare_transport_scenarios.invoke({"km_per_day": km_per_day})
+    steps.append({"tool": "compare_transport_scenarios",
+                  "input": {"km_per_day": km_per_day, "days": 30}})
+
+    regional_baseline = get_regional_baseline.invoke({"country": country})
+    steps.append({"tool": "get_regional_baseline", "input": {"country": country}})
+
+    threshold_instruction = (
+        get_threshold_instruction(actual_monthly_co2)
+        if actual_monthly_co2 is not None else ""
+    )
+
+    # ── Call 2 of 2: synthesize the final response from known-correct data ──
+    context_block = f"""User's original message: {user_message}
+
+COMPUTED RESULTS (use these exact numbers, do not recompute):
+- Monthly footprint: {actual_monthly_co2} kg CO2/month
+- Annual estimate: {pred_result.get('annual_estimate_kg')} kg CO2/year
+- Category breakdown: {pred_result.get('breakdown')}
+- Method: {pred_result.get('method')}
+- Live grid carbon intensity: {live_intensity.get('carbon_intensity_gco2_kwh')} gCO2/kWh ({live_intensity.get('source')})
+- Transport comparison (30 days at {km_per_day} km/day): best={transport_compare.get('best_option')}, worst={transport_compare.get('worst_option')}, max_saving_kg={transport_compare.get('max_saving_kg')}
+- Regional baseline: {regional_baseline}
+
+{threshold_instruction}"""
+
+    synthesis_messages = (
+        [SystemMessage(content=SYNTHESIS_SYSTEM_PROMPT)]
+        + chat_history
+        + [HumanMessage(content=context_block)]
+    )
+    final_msg = llm.invoke(synthesis_messages)
+    final_response = final_msg.content if isinstance(final_msg.content, str) else ""
 
     return {
         "output":    final_response,
