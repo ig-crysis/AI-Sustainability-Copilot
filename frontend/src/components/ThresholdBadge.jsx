@@ -26,8 +26,8 @@ const CONFIG = {
 }
 
 export default function ThresholdBadge({ threshold }) {
-  if (!threshold) return null
-  const cfg = CONFIG[threshold] || CONFIG['THRESHOLD: MODERATE']
+  const cfg = CONFIG[threshold]
+  if (!cfg) return null
 
   return (
     <div style={{
