@@ -44,6 +44,7 @@ class ChatResponse(BaseModel):
     session_id: str
     threshold:    str = "UNKNOWN"
     actual_co2:   Optional[float] = None
+    breakdown:    Optional[dict] = None
 
 class FootprintRequest(BaseModel):
     transport_type: str
@@ -119,7 +120,7 @@ async def chat(request: ChatRequest):
             session_id=request.session_id,
             threshold=result.get("threshold", "UNKNOWN"),
             actual_co2=result.get("actual_co2"),
-            
+            breakdown=result.get("breakdown"),
         )
     except Exception as e:
         import traceback

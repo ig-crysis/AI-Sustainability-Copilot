@@ -11,22 +11,6 @@ import './App.css'
 // ── Constants (outside component is correct) ─────────────────────────────────
 const SESSION_ID = `session_${Date.now()}`
 
-const TRANSPORT_EF = {
-  car_petrol: 0.192, car_diesel: 0.171, car_ev: 0.053,
-  bus: 0.089, train: 0.041, flight_short: 0.255,
-  flight_long: 0.195, motorcycle: 0.114, bicycle: 0.0, walking: 0.0,
-}
-const FOOD_EF = {
-  beef: 27.0, lamb: 39.2, pork: 12.1, chicken: 6.9,
-  fish: 6.1, eggs: 4.8, dairy: 3.2, rice: 4.0,
-  vegetables: 2.0, fruits: 1.1, legumes: 0.9, nuts: 2.5,
-}
-const ENERGY_EF = {
-  coal: 0.820, natural_gas: 0.490, oil: 0.650,
-  solar: 0.041, wind: 0.011, hydro: 0.024, nuclear: 0.012,
-  grid_india: 0.708, grid_us: 0.386, grid_eu: 0.276,
-}
-
 const SUGGESTIONS = [
   "I drive a petrol car 30km daily, eat chicken, use 15kWh/day in India. What's my footprint?",
   "Compare flying vs taking a train for 500km travel",
@@ -102,21 +86,20 @@ export default function App() {
       setToolSteps(data.tools_called)
       setThreshold(data.threshold || null)
 
-      const predictStep = data.tools_called.find(t => t.tool === 'predict_footprint')
-if (predictStep) {
-  const inp = predictStep.input
-  const transport = +((inp.km_per_day || 0) * 30 *
-    (TRANSPORT_EF[inp.transport_type] ?? 0.1)).toFixed(1)
-  const food = (inp.kg_food_per_day || 0) > 0.01
-    ? +((inp.kg_food_per_day || 0) * 30 * (FOOD_EF[inp.food_type] ?? 3.0)).toFixed(1)
-    : 0
-  const energy = +((inp.kwh_per_day || 0) * 30 *
-    (ENERGY_EF[inp.energy_source] ?? 0.5)).toFixed(1)
-  const flights = +((inp.flight_km_total || 0) / 12 * 0.195).toFixed(1)
-  // Use actual model CO2 as total if available, else sum of components
-  const total = data.actual_co2 || (transport + food + energy + flights)
-  setChartData({ transport, food, energy, flights, total })
-}
+      // Use the backend's own per-category breakdown (same numbers the
+      // synthesis LLM's response text is grounded in) rather than
+      // re-deriving them client-side from a separate, easily-drifting set
+      // of hardcoded emission factors and tool-arg field names.
+      if (data.breakdown) {
+        const b = data.breakdown
+        setChartData({
+          transport: b.transport_kg || 0,
+          food:      b.food_kg || 0,
+          energy:    b.energy_kg || 0,
+          flights:   b.flights_kg || 0,
+          total:     data.actual_co2,
+        })
+      }
 
     } catch (err) {
       console.error('[chat] request failed:', err)

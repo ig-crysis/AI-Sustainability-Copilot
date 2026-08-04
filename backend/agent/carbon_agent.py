@@ -266,6 +266,7 @@ def run_agent(user_message: str, chat_history: list = None) -> dict:
             "steps":     [],
             "threshold": "UNKNOWN",
             "actual_co2": None,
+            "breakdown": None,
         }
 
     steps = [{"tool": "predict_footprint", "input": tool_args}]
@@ -323,6 +324,7 @@ COMPUTED RESULTS (use these exact numbers, do not recompute):
         "steps":     steps,
         "threshold": threshold_instruction.split(".")[0] if threshold_instruction else "UNKNOWN",
         "actual_co2": actual_monthly_co2,
+        "breakdown": pred_result.get("breakdown"),
     }
 
 # ── Quick test ───────────────────────────────────────────────────────────────

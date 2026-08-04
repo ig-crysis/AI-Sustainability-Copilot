@@ -26,7 +26,7 @@ export default function EmissionsChart({ data }) {
         Monthly CO₂: <strong style={{ color: '#e8f5e9' }}>{total} kg</strong>
       <span style={{ fontSize: 11, color: '#4a7a4a', marginLeft: 6 }}>(model output)</span>
       </div>
-      <ResponsiveContainer width="100%" height={200}>
+      <ResponsiveContainer width="100%" height={200} initialDimension={{ width: 268, height: 200 }}>
         <PieChart>
           <Pie data={chartData} cx="50%" cy="50%" innerRadius={50}
             outerRadius={80} paddingAngle={3} dataKey="value">
