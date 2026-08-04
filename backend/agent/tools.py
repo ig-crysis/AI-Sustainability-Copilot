@@ -181,6 +181,27 @@ def _check_in_training_range(km_per_day, kg_food_per_day,
     return all(checks)
 
 
+# The raw training dataset only contains a handful of category labels per
+# column (e.g. 4 diet types -> 4 food_type values, 3 heating sources ->
+# 3 energy_source values -- see data_preprocessing.py's DIET_TO_FOOD_EXACT /
+# HEATING_MAP), but predict_footprint's Literal type hints expose the full
+# IPCC/Poore & Nemecek category sets (13 food types, 10 energy sources, 10
+# transport types) so the LLM can extract whatever the user actually said.
+# Categories outside encoders[col].classes_ previously fell into `except
+# ValueError: df_pred[col] = 0` inside predict_footprint, which silently
+# re-mapped them to whatever class happens to be encoded as 0 (e.g. any
+# untrained energy_source -- including "grid_india", predict_footprint's own
+# default -- silently became "coal") instead of triggering the IPCC fallback.
+# This check closes that hole by making category coverage part of the same
+# in/out-of-training-distribution gate as the 5 numeric ranges above.
+def _check_categorical_in_vocab(transport_type, food_type, energy_source) -> bool:
+    return (
+        transport_type in encoders["transport_type"].classes_
+        and food_type in encoders["food_type"].classes_
+        and energy_source in encoders["energy_source"].classes_
+    )
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # TOOL 1 — Predict carbon footprint
 # ────────────────────────────────────────────────────────────────────────────
@@ -311,9 +332,12 @@ def predict_footprint(
     # It cannot see live grid intensity, so we correct its output with the
     # delta between live and the category's training-time baseline intensity.
     ml_pred_kg = None
-    in_range   = _check_in_training_range(
-        km_per_day, kg_food_per_day, kwh_per_day,
-        flights_per_year, flight_km_total
+    in_range   = (
+        _check_in_training_range(
+            km_per_day, kg_food_per_day, kwh_per_day,
+            flights_per_year, flight_km_total
+        )
+        and _check_categorical_in_vocab(transport_type, food_type, energy_source)
     )
 
     if in_range:

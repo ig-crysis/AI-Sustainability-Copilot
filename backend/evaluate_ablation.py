@@ -43,7 +43,9 @@ import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import KFold
 from sklearn.utils import resample
 
 try:
@@ -199,6 +201,74 @@ def energy_delta_sensitivity(X_decoded):
     print(f"  % of test set on grid sources: {grid_mask.sum()/len(grid_mask)*100:.1f}%")
 
 
+
+# XGBoost hyperparameters copied from train_model.py, minus early_stopping_rounds
+# / eval_set / device="cuda" -- k-fold CV holds out a different fold as the
+# validation set each iteration, so there's no single fixed eval_set to early-
+# stop against, and CPU-only "hist" keeps this reproducible on machines without
+# a GPU. This is a deliberate, documented deviation from the exact deployed
+# training recipe, not an attempt to reproduce it fold-for-fold.
+CV_XGB_PARAMS = {
+    "n_estimators":     600,
+    "max_depth":        6,
+    "learning_rate":    0.04,
+    "subsample":        0.85,
+    "colsample_bytree": 0.85,
+    "min_child_weight": 3,
+    "random_state":     42,
+    "tree_method":      "hist",
+}
+
+
+def kfold_cv(k=5):
+    """5-fold CV on the combined train+test set (10,000 rows), retraining
+    XGBoost from scratch on each fold. The production R²=0.83 headline number
+    is a single 80/20 split with no variance estimate -- this reports the
+    mean and std of R²/MAE/RMSE across folds so the paper can cite a spread,
+    not just a point estimate."""
+    X_train = pd.read_csv(f"{PROCESSED_DIR}/X_train.csv")
+    X_test = pd.read_csv(f"{PROCESSED_DIR}/X_test.csv")
+    y_train = pd.read_csv(f"{PROCESSED_DIR}/y_train.csv").squeeze()
+    y_test = pd.read_csv(f"{PROCESSED_DIR}/y_test.csv").squeeze()
+
+    X_full = pd.concat([X_train, X_test], ignore_index=True)
+    y_full = pd.concat([y_train, y_test], ignore_index=True).to_numpy()
+
+    kf = KFold(n_splits=k, shuffle=True, random_state=42)
+    fold_metrics = []
+
+    print("\n" + "=" * 74)
+    print(f"K-FOLD CROSS-VALIDATION (k={k}, {len(X_full)} rows, retrained per fold)")
+    print("=" * 74)
+
+    for i, (train_idx, val_idx) in enumerate(kf.split(X_full), start=1):
+        model = XGBRegressor(**CV_XGB_PARAMS)
+        model.fit(X_full.iloc[train_idx], y_full[train_idx])
+        preds = model.predict(X_full.iloc[val_idx])
+
+        mae = mean_absolute_error(y_full[val_idx], preds)
+        rmse = np.sqrt(mean_squared_error(y_full[val_idx], preds))
+        r2 = r2_score(y_full[val_idx], preds)
+        fold_metrics.append({"fold": i, "MAE": mae, "RMSE": rmse, "R2": r2})
+        print(f"  Fold {i}: MAE={mae:.2f}  RMSE={rmse:.2f}  R2={r2:.4f}")
+
+    r2_arr = np.array([f["R2"] for f in fold_metrics])
+    mae_arr = np.array([f["MAE"] for f in fold_metrics])
+    rmse_arr = np.array([f["RMSE"] for f in fold_metrics])
+
+    print("-" * 74)
+    print(f"  Mean R2:   {r2_arr.mean():.4f}  (std {r2_arr.std(ddof=1):.4f})")
+    print(f"  Mean MAE:  {mae_arr.mean():.2f}  (std {mae_arr.std(ddof=1):.2f})")
+    print(f"  Mean RMSE: {rmse_arr.mean():.2f}  (std {rmse_arr.std(ddof=1):.2f})")
+    print("\n" + "=" * 74)
+    print("KEY NUMBERS FOR PAPER (k-fold CV)")
+    print("=" * 74)
+    print(f"  {k}-fold CV R2:  {r2_arr.mean():.4f} +/- {r2_arr.std(ddof=1):.4f}")
+    print(f"  {k}-fold CV MAE: {mae_arr.mean():.2f} +/- {mae_arr.std(ddof=1):.2f} kg CO2/month")
+
+    return fold_metrics
+
+
 def run():
     print("[INFO] Loading test data...")
     X_test, X_decoded, y_test, xgb_model, rf_model = load_data()
@@ -245,6 +315,7 @@ def run():
     print(f"  Improvement over IPCC-only (R2):  {ours['R2'] - results[1]['R2']:+.4f}")
 
     energy_delta_sensitivity(X_decoded)
+    kfold_cv(k=5)
 
 
 if __name__ == "__main__":

@@ -147,7 +147,7 @@ if (predictStep) {
           <div className="header-left">
             <Leaf size={22} color="#4caf50" />
             <span className="header-title">AI Sustainability Copilot</span>
-            <span className="header-badge">XGBoost + LangGraph</span>
+            <span className="header-badge">XGBoost + Groq LLM</span>
           </div>
           <div className="header-right">
   <span className="status-dot" />

@@ -39,13 +39,13 @@ export default function Sidebar({ open, onToggle, toolSteps, chartData }) {
                 <span>Model</span><span>XGBoost</span>
               </div>
               <div className="info-row">
-                <span>R² Score</span><span style={{ color: '#4caf50' }}>0.829</span>
+                <span>R² Score</span><span style={{ color: '#4caf50' }}>0.83</span>
               </div>
               <div className="info-row">
-                <span>LLM</span><span>Llama 3.3 70B</span>
+                <span>LLM</span><span>Llama 3.1 8B (Groq)</span>
               </div>
               <div className="info-row">
-                <span>Agent</span><span>LangGraph</span>
+                <span>Agent</span><span>2-call pipeline</span>
               </div>
             </div>
           </div>

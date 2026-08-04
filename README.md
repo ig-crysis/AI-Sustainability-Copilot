@@ -92,15 +92,29 @@ numbers below are from the held-out test set, 2,000 rows, 80/20 split,
 | RandomForest | 27.47 | 0.80 |
 | **XGBoost (deployed primary)** | **25.30** | **0.83** (95% CI [0.81, 0.84]) |
 
+5-fold cross-validation (retraining from scratch on each fold, combined
+10,000-row train+test set) confirms this wasn't a lucky split:
+**R² = 0.8217 ± 0.0044**, **MAE = 25.92 ± 0.24 kg CO2/month** across folds.
+
 **Second important caveat**: the table above scores XGBoost against
 held-out rows drawn from the training distribution, so it is (by
 construction) almost always "in range." On realistic user queries, it
-isn't: `backend/evaluate_routing.py` samples 300 randomly-generated
-realistic scenarios (not dataset rows) and finds XGBoost only fires on
-**29.7%** of them — the other 70.3% silently fall back to the IPCC
-formula, which is the same formula shown above scoring R²=-56. See
-`research/LIMITATIONS.md` for the full numbers, including how much
-XGBoost and IPCC disagree with each other on the cases where both apply.
+isn't: `backend/evaluate_routing.py` samples 3,000 randomly-generated
+realistic scenarios (not dataset rows). A first pass found XGBoost's
+numeric-range gate alone passes only **29.8%** of them. A deeper pass
+found the real number is far smaller: the categorical fields
+(`transport_type`/`food_type`/`energy_source`) also weren't gated at all,
+and the raw training data only contains 5/10, 4/13, and 3/10 of the
+category values `predict_footprint` exposes respectively — notably,
+**`grid_india`, the tool's own default `energy_source`, was never a
+trained category.** Unrecognized categories used to silently fall back to
+class 0 and still return an XGBoost prediction marked "in range" — a real
+production bug, now fixed by gating on categorical vocabulary membership
+too. After the fix, only **0.8%** of realistic scenarios pass both gates —
+**the IPCC formula, not XGBoost, is the de facto primary predictor for
+this deployed system.** See `research/LIMITATIONS.md` for the full
+numbers, including how much XGBoost and IPCC disagree with each other on
+the rare cases where both apply.
 
 The IPCC-only row is intentionally kept in the table: an earlier production
 version used IPCC as the primary predictor with XGBoost as a bounded ±15%
@@ -114,11 +128,11 @@ model updates and the harness hits a non-deterministic live API:
 
 | Metric | Result |
 |---|---|
-| Tool-call errors (malformed function calls) | 1/14 (7.1%) |
-| Fully correct (all extracted fields match ground truth) | 8/14 (57.1%) |
-| Mean per-field extraction accuracy | 96.2% |
+| Tool-call errors (malformed function calls) | 0/14 (0%) |
+| Fully correct (all extracted fields match ground truth) | 7/14 (50.0%) |
+| Mean per-field extraction accuracy | 95.9% |
 
-Two distinct `tool_use_failed` bugs have been found and fixed so far:
+Three distinct `tool_use_failed` bugs have been found and fixed so far:
 1. An earlier tool design asked the LLM to pre-compute derived quantities
    itself (e.g. sum device-hours into a single `kwh_per_day`); that caused
    **11/12 (92%) of queries to fail outright**, because the model would
@@ -135,8 +149,18 @@ Two distinct `tool_use_failed` bugs have been found and fixed so far:
    measured at **43% of queries** right after the pipeline rewrite below.
    Fixed by declaring those fields as `Literal[...]` types (a real JSON
    schema `enum` constraint, not prose) and running the extraction call at
-   `temperature=0` — dropped the failure rate to 7.1%. See
-   `research/LIMITATIONS.md` for the measurement history.
+   `temperature=0` — dropped the failure rate to 7.1%.
+3. The remaining 7.1% wasn't random flakiness as first assumed: the one
+   residual failing case failed identically 4/4 times at `temperature=0`,
+   and its `failed_generation` showed the extraction was already correct —
+   Groq had rejected it purely for being in Llama's native
+   `<function=name>{...}` text format rather than its structured tool-call
+   schema. Fixed by parsing and recovering that rejected text
+   (`agent/carbon_agent.py::_recover_native_function_call`) instead of
+   retrying identical messages, with a same-request retry kept as a second
+   layer for genuinely stochastic failures. Dropped the failure rate to
+   0/14 in the next full eval run. See `research/LIMITATIONS.md` for the
+   measurement history.
 
 ## Citations
 

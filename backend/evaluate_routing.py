@@ -46,7 +46,7 @@ except Exception:
     pass
 
 SEED = 42
-N_SCENARIOS = 300
+N_SCENARIOS = 3000
 
 TRANSPORT_TYPES = list(TRANSPORT_EF.keys())
 FOOD_TYPES = list(FOOD_EF.keys())
@@ -162,6 +162,21 @@ def in_range_per_feature(feats: dict) -> dict:
     }
 
 
+def categorical_in_vocab(s: dict) -> dict:
+    """Per-category vocabulary coverage check, mirroring the fix in
+    agent/tools.py::_check_categorical_in_vocab. The raw training data only
+    has a handful of category labels per column (see
+    data_preprocessing.py's DIET_TO_FOOD_EXACT / HEATING_MAP), far fewer than
+    predict_footprint's Literal type hints expose -- e.g. "grid_india"
+    (predict_footprint's own default energy_source) is not in the trained
+    vocabulary at all."""
+    return {
+        "transport_type": s["transport_type"] in encoders["transport_type"].classes_,
+        "food_type": s["food_type"] in encoders["food_type"].classes_,
+        "energy_source": s["energy_source"] in encoders["energy_source"].classes_,
+    }
+
+
 def ipcc_breakdown_total(s: dict, feats: dict) -> float:
     """Static-grid IPCC total -- same formula as agent/tools.py, with live
     grid intensity == the energy source's own baseline (no httpx call; see
@@ -208,46 +223,75 @@ def run():
     rng = random.Random(SEED)
     print(f"[INFO] Sampling {N_SCENARIOS} realistic scenarios (seed={SEED})...")
 
-    in_range_count = 0
+    in_range_count = 0            # numeric ranges only (original measure)
+    true_in_range_count = 0       # numeric ranges AND categorical vocabulary (post-fix gate)
     feature_fail_counts = {name: 0 for name in TRAINING_RANGES}
-    agreements = []  # (ml_pred, ipcc_pred) for in-range scenarios
+    cat_fail_counts = {name: 0 for name in ("transport_type", "food_type", "energy_source")}
+    agreements = []  # (ml_pred, ipcc_pred) for true-in-range scenarios
     all_ipcc = []
 
     for _ in range(N_SCENARIOS):
         s = sample_scenario(rng)
         feats = derive_features(s)
         per_feature = in_range_per_feature(feats)
-        overall_in_range = all(per_feature.values())
+        numeric_in_range = all(per_feature.values())
+        per_cat = categorical_in_vocab(s)
+        cat_in_vocab = all(per_cat.values())
+        true_in_range = numeric_in_range and cat_in_vocab
 
         ipcc_pred = ipcc_breakdown_total(s, feats)
         all_ipcc.append(ipcc_pred)
 
-        if overall_in_range:
+        if numeric_in_range:
             in_range_count += 1
-            ml_pred = xgboost_prediction(s, feats)
-            agreements.append((ml_pred, ipcc_pred))
         else:
             for name, ok in per_feature.items():
                 if not ok:
                     feature_fail_counts[name] += 1
 
+        if not cat_in_vocab:
+            for name, ok in per_cat.items():
+                if not ok:
+                    cat_fail_counts[name] += 1
+
+        if true_in_range:
+            true_in_range_count += 1
+            ml_pred = xgboost_prediction(s, feats)
+            agreements.append((ml_pred, ipcc_pred))
+
     n = N_SCENARIOS
     pct_in_range = in_range_count / n * 100
+    pct_true_in_range = true_in_range_count / n * 100
 
     print("\n" + "=" * 74)
     print("ROUTING: HOW OFTEN DOES XGBOOST ACTUALLY FIRE ON REALISTIC QUERIES?")
     print("=" * 74)
-    print(f"  Scenarios sampled:                {n}")
-    print(f"  In-range (XGBoost used):          {in_range_count}/{n} ({pct_in_range:.1f}%)")
-    print(f"  Out-of-range (IPCC fallback used): {n - in_range_count}/{n} ({100 - pct_in_range:.1f}%)")
+    print(f"  Scenarios sampled:                          {n}")
+    print(f"  Numeric ranges only (old, pre-fix measure): {in_range_count}/{n} ({pct_in_range:.1f}%)")
+    print(f"  Numeric ranges + categorical vocabulary:    {true_in_range_count}/{n} ({pct_true_in_range:.1f}%)")
+    print(f"  Out-of-range (IPCC fallback used):          {n - true_in_range_count}/{n} ({100 - pct_true_in_range:.1f}%)")
+    print("  (Before the categorical-vocabulary fix, the gap between the two rows above")
+    print("   was invisible: unseen categories silently fell through to `except: =0`")
+    print("   inside predict_footprint instead of triggering the IPCC fallback.)")
 
     print("\n" + "-" * 74)
-    print("  Out-of-range scenarios: which feature caused the fallback?")
+    print("  Numeric-range fallbacks: which feature caused it?")
     print("  (a scenario can fail more than one feature, so these don't need to sum to the total)")
     print("-" * 74)
     for name, count in sorted(feature_fail_counts.items(), key=lambda x: -x[1]):
         pct_of_out_of_range = (count / (n - in_range_count) * 100) if in_range_count < n else 0.0
-        print(f"  {name:<20} {count:>4} scenarios ({pct_of_out_of_range:5.1f}% of all out-of-range cases)")
+        print(f"  {name:<20} {count:>4} scenarios ({pct_of_out_of_range:5.1f}% of all numeric-out-of-range cases)")
+
+    print("\n" + "-" * 74)
+    print("  Categorical-vocabulary fallbacks: which field caused it?")
+    print("  (out of the vocabulary the raw training data actually contains -- see")
+    print("   data_preprocessing.py's DIET_TO_FOOD_EXACT / HEATING_MAP / VEHICLE_MAP)")
+    print("-" * 74)
+    for name, count in sorted(cat_fail_counts.items(), key=lambda x: -x[1]):
+        pct = count / n * 100
+        print(f"  {name:<20} {count:>4} scenarios ({pct:5.1f}% of all {n} scenarios)")
+    for name, le in encoders.items():
+        print(f"    trained vocabulary for {name}: {sorted(le.classes_)}")
 
     if agreements:
         ml_arr = np.array([a[0] for a in agreements])
@@ -276,13 +320,17 @@ def run():
     print("\n" + "=" * 74)
     print("KEY NUMBERS FOR PAPER")
     print("=" * 74)
-    print(f"  % of realistic queries where XGBoost fires (in-range): {pct_in_range:.1f}%")
+    print(f"  % of realistic queries where XGBoost fires, numeric ranges only (pre-fix): {pct_in_range:.1f}%")
+    print(f"  % of realistic queries where XGBoost fires, numeric + categorical (post-fix): {pct_true_in_range:.1f}%")
     if agreements:
         print(f"  Mean disagreement (XGBoost vs IPCC) when both apply:  "
               f"{abs_diff.mean():.2f} kg CO2/month ({rel_diff.mean():.1f}% relative)")
     top_blocker = max(feature_fail_counts, key=feature_fail_counts.get)
-    print(f"  Single biggest cause of fallback:                       {top_blocker} "
+    print(f"  Single biggest numeric-range cause of fallback:         {top_blocker} "
           f"({feature_fail_counts[top_blocker]} scenarios)")
+    top_cat_blocker = max(cat_fail_counts, key=cat_fail_counts.get)
+    print(f"  Single biggest categorical cause of fallback:           {top_cat_blocker} "
+          f"({cat_fail_counts[top_cat_blocker]} scenarios, {cat_fail_counts[top_cat_blocker]/n*100:.1f}%)")
 
 
 if __name__ == "__main__":

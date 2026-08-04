@@ -1,8 +1,10 @@
 import os
 import re
+import json
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+import groq
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -63,8 +65,17 @@ LIFESTYLE FEATURE RULES (extract if mentioned):
 - Energy efficiency: energy_efficient=true only if user explicitly says
   they use LED bulbs, efficient appliances, or similar
 
-ALWAYS call predict_footprint, even if the message is vague — use the
-defaults above for anything not mentioned."""
+If the message describes or asks about ANY lifestyle activity (transport,
+food, energy, travel, waste, shopping) or asks about their carbon footprint
+at all — even vaguely, with no specifics — ALWAYS call predict_footprint,
+using the defaults above for anything not mentioned.
+
+If the message is entirely unrelated to lifestyle or carbon footprint (e.g.
+small talk, general knowledge questions, anything off-topic), do NOT call
+predict_footprint or any other tool. There is no other tool available to
+you — do not invent one. Instead, write one short, friendly sentence
+explaining you can only help with carbon footprint questions and asking
+about their transport, food, or energy habits."""
 
 SYNTHESIS_SYSTEM_PROMPT = """You are an expert AI sustainability copilot. The user's carbon footprint has
 already been computed for you (via a hybrid XGBoost + IPCC model) along with
@@ -126,6 +137,91 @@ def _build_llm(temperature: float = 0.2):
     )
 
 
+def _is_tool_use_failed(exc: BaseException) -> bool:
+    body = getattr(exc, "body", None)
+    return isinstance(body, dict) and (body.get("error") or {}).get("code") == "tool_use_failed"
+
+
+_NATIVE_FUNCTION_CALL_RE = re.compile(r"<function=(\w+)>(\{.*?\})", re.DOTALL)
+
+
+def _recover_native_function_call(exc: BaseException, tool_name: str):
+    """Groq's tool_use_failed rejects the ENTIRE response outright based on
+    format alone, even when llama-3.1-8b-instant's extracted content is
+    correct. Confirmed by direct repro (see research/LIMITATIONS.md): a
+    query that fails deterministically (same result across repeated calls
+    at temperature=0, so a same-request retry cannot help) turned out to
+    have a fully correct, well-formed extraction in `failed_generation` —
+    the model just emitted it in Llama's native `<function=name>{...}` text
+    format instead of Groq's expected structured tool-call schema. This
+    recovers that case by parsing the JSON out of the rejected text instead
+    of discarding a perfectly good answer."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict) or not _is_tool_use_failed(exc):
+        return None
+    failed_generation = (body.get("error") or {}).get("failed_generation", "")
+    match = _NATIVE_FUNCTION_CALL_RE.search(failed_generation)
+    if not match or match.group(1) != tool_name:
+        return None
+    try:
+        return json.loads(match.group(2))
+    except json.JSONDecodeError:
+        return None
+
+
+_OFF_TOPIC_DECLINE = (
+    "I'm your carbon footprint copilot — I can only help with questions "
+    "about your transport, food, energy, or lifestyle emissions. Tell me "
+    "about your daily habits and I'll estimate your footprint!"
+)
+
+
+def _run_extraction(llm, messages, tool_name: str, max_retries: int = 1):
+    """Returns (tool_args, declined_content). tool_args is None only if the
+    model legitimately declined to call the tool (e.g. an off-topic
+    message); declined_content then carries whatever text it wrote instead.
+
+    On a Groq tool_use_failed error: first try to recover a correct
+    extraction from the rejected native-format text (see
+    _recover_native_function_call — no extra API call, and works even for
+    deterministic per-query failures a retry can't fix). Only if that fails
+    does this retry the call outright, which helps for the model's
+    remaining genuinely stochastic malformed-generation flakiness (measured
+    ~7% in evaluate_agent.py).
+
+    If every attempt still fails with tool_use_failed (e.g. the model
+    hallucinates an entirely unrelated tool name for an off-topic message —
+    confirmed reproducible with a fictional "brute_search" tool on
+    "What's the weather like today?"), this treats it as a decline rather
+    than raising: there's nothing recoverable in that response, and letting
+    Groq's raw error body escape to the end user is worse than a generic
+    fallback message. Any other (non-tool_use_failed) exception still
+    propagates immediately."""
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            ai_msg = llm.invoke(messages)
+        except groq.BadRequestError as e:
+            if not _is_tool_use_failed(e):
+                raise
+            recovered = _recover_native_function_call(e, tool_name)
+            if recovered is not None:
+                return recovered, ""
+            if attempt < max_retries:
+                last_exc = e
+                continue
+            return None, _OFF_TOPIC_DECLINE
+
+        tool_call = next(
+            (tc for tc in (ai_msg.tool_calls or []) if tc["name"] == tool_name),
+            None,
+        )
+        if tool_call is not None:
+            return tool_call["args"], ""
+        return None, ai_msg.content if isinstance(ai_msg.content, str) else ""
+    raise last_exc
+
+
 def run_agent(user_message: str, chat_history: list = None) -> dict:
     """
     Run the agent in exactly two LLM calls: one to extract structured facts
@@ -158,35 +254,32 @@ def run_agent(user_message: str, chat_history: list = None) -> dict:
         + chat_history
         + [HumanMessage(content=user_message)]
     )
-    ai_msg = extraction_llm.invoke(messages)
-
-    tool_call = next(
-        (tc for tc in (ai_msg.tool_calls or []) if tc["name"] == "predict_footprint"),
-        None,
+    tool_args, declined_content = _run_extraction(
+        extraction_llm, messages, "predict_footprint"
     )
 
-    if tool_call is None:
+    if tool_args is None:
         # Model declined to call the tool (e.g. an off-topic message) —
         # nothing to synthesize against, just return what it said.
         return {
-            "output":    ai_msg.content if isinstance(ai_msg.content, str) else "",
+            "output":    declined_content,
             "steps":     [],
             "threshold": "UNKNOWN",
             "actual_co2": None,
         }
 
-    steps = [{"tool": "predict_footprint", "input": tool_call["args"]}]
+    steps = [{"tool": "predict_footprint", "input": tool_args}]
 
     try:
-        pred_result = predict_footprint.invoke(tool_call["args"])
+        pred_result = predict_footprint.invoke(tool_args)
     except Exception:
         pred_result = {}
     actual_monthly_co2 = pred_result.get("predicted_monthly_co2_kg")
 
     # ── Deterministic enrichment — no LLM judgment needed for these, so no
     #    reason to spend a tool-choice round trip on each one ───────────────
-    country     = tool_call["args"].get("country", "india")
-    km_per_day  = tool_call["args"].get("km_per_day", 0.0)
+    country     = tool_args.get("country", "india")
+    km_per_day  = tool_args.get("km_per_day", 0.0)
 
     live_intensity = get_live_carbon_intensity.invoke({"country": country})
     steps.append({"tool": "get_live_carbon_intensity", "input": {"country": country}})

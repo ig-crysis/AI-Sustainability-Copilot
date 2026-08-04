@@ -73,17 +73,54 @@ system changes.
 
 ## Open limitations
 
-- **Residual ~7% tool-call failure rate remains, even after the fix
-  above.** Confirmed via repeated single-query reruns that this is
-  inherent flakiness in `llama-3.1-8b-instant`'s structured-output
-  reliability, not a deterministic per-query bug — the same query
-  succeeds most of the time and fails occasionally. `temperature=0`
-  reduced but did not eliminate it. Not further mitigated in this pass;
-  a retry-once-on-`tool_use_failed` wrapper would likely close most of
-  the remaining gap cheaply.
-- **Single train/test split, no k-fold cross-validation.** The reported
-  R²=0.83 is from one 80/20 split (`random_state=42`). No variance estimate
-  across folds — only a bootstrap CI on that single split's residuals.
+- ~~**Residual ~7% tool-call failure rate remains, even after the fix
+  above.**~~ **RESOLVED (2026-07-28, `agent/carbon_agent.py::_run_extraction`,
+  `_recover_native_function_call`).** The "inherent flakiness" framing above
+  turned out to be wrong for at least one confirmed case: the residual
+  1/14 failure (`direct_food_quantity_stated` in `evaluate_agent.py`) was
+  re-run 4 times total across this pass (2 full harness runs + 2 isolated
+  single-query repro calls) and failed **all 4 times**, identically, at
+  `temperature=0` — i.e. deterministic for this query, not random. A retry
+  with the same messages can never fix a deterministic failure, so a
+  retry-only wrapper was insufficient on its own (confirmed empirically:
+  wrapping the extraction call in a retry-once-on-`tool_use_failed`
+  handler, verified correct via a mocked unit test, still left this exact
+  case failing in two separate live-API eval runs).
+
+  Inspecting the raw Groq error body (`e.body["error"]["failed_generation"]`)
+  revealed the actual root cause: the model's extraction was **already
+  fully correct** — `<function=predict_footprint>{"transport_type": "bus",
+  "km_per_day": 20, "total_kg_food_per_day": 0.3, "energy_source": "wind",
+  ...}` — but emitted in Llama's native `<function=name>{...}` text format
+  instead of Groq's expected structured tool-call schema, and Groq rejects
+  the *entire* response outright based on that format mismatch alone,
+  regardless of whether the content is right. Fixed by parsing this
+  rejected text as a recovery path (`_recover_native_function_call`): on
+  `tool_use_failed`, extract and JSON-parse the `<function=...>{...}`
+  payload from `failed_generation` before falling back to a same-request
+  retry (which is kept as a second layer for any genuinely stochastic
+  failures, since it costs nothing when recovery succeeds on the first
+  try). Verified by direct repro: the previously deterministic 4/4-failing
+  query now succeeds on every call by recovering the correct extraction.
+  Re-running the full `evaluate_agent.py` suite once more after this fix
+  gave **0/14 `tool_use_failed` errors** (the one agent error in that run
+  was an unrelated `RateLimitError` 429 — the already-documented 6000 TPM
+  Groq cap, triggered by three eval runs in quick succession — not a
+  tool-call formatting failure). General lesson for the paper: a
+  `tool_use_failed` rejection is a claim about *response format*, not
+  necessarily about *extraction correctness* — worth checking
+  `failed_generation` before assuming the underlying reasoning was wrong.
+- ~~**Single train/test split, no k-fold cross-validation.**~~ **RESOLVED
+  (2026-07-28, `backend/evaluate_ablation.py::kfold_cv`).** 5-fold CV on the
+  combined 10,000-row train+test set (XGBoost retrained from scratch per
+  fold, same hyperparameters as `train_model.py` minus early stopping/GPU —
+  there's no single fixed validation set to early-stop against when the held-
+  out fold changes each iteration) gives **R² = 0.8217 ± 0.0044** and
+  **MAE = 25.92 ± 0.24 kg CO2/month** across folds — tight variance,
+  consistent with the original single-split R²=0.83 and its bootstrap CI
+  [0.8135, 0.8439]. The single-split number was not a lucky split. This
+  addresses the CV gap; it does **not** address the separate, larger issue
+  below (synthetic target, no external validation).
 - **Small LLM chosen for cost/latency, not benchmarked accuracy.**
   `llama-3.1-8b-instant` was not compared against larger models on
   extraction accuracy; `backend/evaluate_agent.py` measures its accuracy in
@@ -102,36 +139,86 @@ system changes.
   `coal`). This is a legitimate simplification but a real source of label
   noise in training data.
 - **Measured (2026-07-28, `backend/evaluate_routing.py`): XGBoost — the
-  "primary, R²=0.83" model — only fires on ~30% of realistic queries, and
-  disagrees sharply with the IPCC fallback on the rest of the cases where
-  both are computable. This is arguably the single most important open
-  limitation for the paper, more consequential than a citation gap.** The
-  in-range check is a single AND-gate across all 5 features
+  "primary, R²=0.83" model — only fires on ~30% of realistic queries by the
+  numeric-range gate alone, and disagrees sharply with the IPCC fallback on
+  the cases where both are computable.** The in-range check is a single
+  AND-gate across all 5 numeric features
   (km_per_day/kg_food_per_day/kwh_per_day/flights_per_year/flight_km_total)
   — if any one falls outside its training range, the *entire* prediction
   falls back to the IPCC formula, even if the other four are well within
-  range. Over 300 randomly-sampled realistic scenarios (not dataset rows —
-  see the script for the sampling procedure): **only 89/300 (29.7%)
-  actually routed through XGBoost; 211/300 (70.3%) fell back to IPCC.**
-  That fallback is the same IPCC formula already shown (see "Production
-  formula was miscalibrated" above) to score R²=-56 to -73.8 against this
-  project's own held-out synthetic target — i.e. the method used on the
-  *majority* of realistic queries is one already demonstrated to be worse
-  than predicting the mean. Of the fallback cases, `kwh_per_day` was the
-  single biggest blocker (55.0% of out-of-range scenarios) as previously
-  known, but `flight_km_total` (36.5%) and `kg_food_per_day` (29.9%) are
-  comparably large, previously-unmeasured contributors. **Separately, among
-  the 89 scenarios where XGBoost *did* fire, it disagreed with the IPCC
-  estimate on the same inputs by a mean of 609 kg CO2/month (68.7%
-  relative; XGBoost averaged 170 kg/month vs. IPCC's 754 kg/month on the
-  same scenarios), with 82% of those scenarios differing by more than
-  50%.** This is not a ground-truth comparison — both methods are
-  estimating the same synthetic-target-fit quantity differently — but it
-  quantifies how much the routing gate's binary in/out-of-range decision
+  range. Over 3,000 randomly-sampled realistic scenarios (not dataset rows —
+  see the script for the sampling procedure): **895/3000 (29.8%) passed the
+  numeric-range gate.** Of the numeric fallback cases, `kwh_per_day` was the
+  single biggest blocker (56.2%), with `flight_km_total` (33.9%) and
+  `kg_food_per_day` (30.0%) comparably large contributors. Root cause for
+  those last two, confirmed by reading `data_preprocessing.py`: they aren't
+  narrow because of sampling — they're *derived from small categorical
+  lookup tables* in the raw dataset (`FLIGHT_MAP` has exactly 4 frequency
+  buckets → 4 possible `flight_km_total` values; `DIET_TO_FOOD_EXACT` has 4
+  diet types → effectively 3 distinct `kg_food_per_day` values). A
+  continuous, realistic `flight_km_total` or `kg_food_per_day` was never
+  something the model was trained to interpolate over, which is why simply
+  widening `TRAINING_RANGES` for these fields would not be a safe fix (see
+  the kwh_per_day incident above, where widening a range let a genuinely
+  out-of-distribution input reach the model and produce a nonsensical
+  prediction) — not attempted for this reason.
+
+  **FIXED — second, larger routing bug found and closed this pass
+  (2026-07-28, `agent/tools.py::_check_categorical_in_vocab`,
+  `backend/evaluate_routing.py`): the numeric-range gate above was never the
+  full story, because `transport_type`/`food_type`/`energy_source` had no
+  vocabulary check at all.** `predict_footprint`'s `Literal` type hints
+  expose the full IPCC/Poore & Nemecek category sets — 10 transport types,
+  13 food types, 10 energy sources — so the extraction LLM can name whatever
+  the user actually said. But the raw training dataset only contains a
+  handful of category labels per column (confirmed directly from
+  `data/processed/encoders.pkl`): **`transport_type` ∈ {bicycle, bus,
+  car_diesel, car_ev, car_petrol} (5/10), `food_type` ∈ {chicken, dairy,
+  fish, vegetables} (4/13), `energy_source` ∈ {coal, grid_eu, natural_gas}
+  (3/10)**. Critically, **`grid_india` — `predict_footprint`'s own default
+  energy_source — was never in the trained vocabulary.** Before this fix,
+  any category outside that list hit `except ValueError: df_pred[col] = 0`
+  inside `predict_footprint`, which silently re-mapped it to whichever class
+  happens to be encoded as 0 (e.g. any untrained energy_source silently
+  became "coal") and *still returned an XGBoost prediction* with
+  `ml_in_training_range: True` — a real, silently-wrong-answer bug in
+  production, not merely an accuracy gap. Fixed by folding categorical
+  vocabulary membership into the same in/out-of-training-distribution gate
+  as the 5 numeric ranges, so an unrecognized category now correctly
+  triggers the IPCC fallback instead of a miscoded ML prediction.
+
+  **Re-measuring after the fix reveals the true picture is far more
+  extreme than the 29.8% numeric-only figure suggested: only 25/3000
+  (0.8%) of realistic scenarios pass BOTH the numeric range gate and the
+  categorical vocabulary gate.** `energy_source` alone fails 70.5% of all
+  3,000 scenarios (a direct consequence of `grid_india`/`grid_us` not being
+  trained categories), `food_type` fails 69.9%, `transport_type` fails
+  51.1%. **In production terms: XGBoost, the model this project reports
+  R²=0.83 for, correctly and safely fires on well under 1% of realistic
+  natural-language queries; the IPCC formula is the de facto primary
+  predictor for the deployed system, not XGBoost.** This is a stronger and
+  more important claim than the original 29.8% finding, and arguably the
+  single most consequential limitation in the whole project — more so than
+  the synthetic-data provenance issue, because it means the R²=0.83 model
+  essentially never actually runs on real traffic.
+
+  Among the 25 (now correctly gated) in-range scenarios, XGBoost disagreed
+  with the IPCC estimate by a mean of 581.53 kg CO2/month (69.3% relative;
+  XGBoost averaged 157 kg/month vs. IPCC's 728 kg/month), 84% of those
+  scenarios differing by more than 50%. n=25 is small — this sub-statistic
+  should be read as indicative, not precise. This is not a ground-truth
+  comparison — both methods estimate the same synthetic-target-fit quantity
+  differently — but it quantifies how much the routing gate's decision
   swings the number a user actually sees, with no uncertainty indication
-  surfaced to them either way. Not fixed in this pass — a more granular
-  per-feature confidence model, or surfacing the disagreement/uncertainty
-  to the user, would be reasonable follow-ups.
+  surfaced to them either way. **Not fixed in this pass: expanding the
+  trained categorical vocabulary would require retraining on data the raw
+  Kaggle dataset doesn't have (it only contains 4 diet types, 3 heating
+  sources, etc. to begin with) — this is a training-data coverage
+  limitation, not a routing-logic bug, and is out of scope without a richer
+  dataset.** Surfacing the disagreement/uncertainty to the user, or
+  reframing the system's primary predictor as the IPCC formula (with
+  XGBoost as a rare high-confidence override) rather than the reverse,
+  would be reasonable follow-ups.
 - **No external validation.** No comparison against an established
   third-party carbon calculator, and no user study on whether the agent's
   suggestions are perceived as accurate or useful.

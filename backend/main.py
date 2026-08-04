@@ -92,7 +92,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "model": "XGBoost R²=0.971", "llm": "Llama-3.3-70B"}
+    return {"status": "healthy", "model": "XGBoost R²=0.83 (synthetic data, see research/LIMITATIONS.md)", "llm": "llama-3.1-8b-instant"}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -125,7 +125,10 @@ async def chat(request: ChatRequest):
         import traceback
         traceback.print_exc()
         print(f"[ERROR] /chat failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong processing your message. Please try rephrasing it.",
+        )
 
 
 @app.post("/predict", response_model=FootprintResponse)
@@ -165,8 +168,12 @@ async def predict(request: FootprintRequest):
         )
     except Exception as e:
         import traceback
-        traceback.print_exc() 
-        raise HTTPException(status_code=500, detail=str(e))
+        traceback.print_exc()
+        print(f"[ERROR] /predict failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong processing your request. Please check your inputs and try again.",
+        )
 
 
 @app.delete("/session/{session_id}")
