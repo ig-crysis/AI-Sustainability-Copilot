@@ -131,7 +131,7 @@ def get_threshold_instruction(monthly_co2: float) -> str:
 
 def _build_llm(temperature: float = 0.2):
     return ChatGroq(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-120b",
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=temperature,
     )
