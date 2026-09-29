@@ -93,7 +93,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "model": "XGBoost R²=0.83 (synthetic data, see research/LIMITATIONS.md)", "llm": "llama-3.1-8b-instant"}
+    return {"status": "healthy", "model": "XGBoost R²=0.83 (synthetic data, see research/LIMITATIONS.md)", "llm": "openai/gpt-oss-120b"}
 
 
 @app.post("/chat", response_model=ChatResponse)
