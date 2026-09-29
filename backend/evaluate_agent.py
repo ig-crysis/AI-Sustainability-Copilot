@@ -42,7 +42,7 @@ try:
 except Exception:
     pass
 
-MODEL_NAME = "llama-3.1-8b-instant"  # must match agent/carbon_agent.py::build_agent
+MODEL_NAME = "openai/gpt-oss-120b"  # must match agent/carbon_agent.py::build_agent
 
 CATEGORICAL_FIELDS = ["transport_type", "food_type", "energy_source", "shower_frequency"]
 NUMERIC_FIELDS = [
