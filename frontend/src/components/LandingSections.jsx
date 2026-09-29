@@ -51,7 +51,7 @@ const STEPS = [
 const STATS = [
   { icon: Gauge,     value: 'R² 0.83', label: 'Model fit on held-out data' },
   { icon: Layers,    value: 'XGBoost', label: 'Gradient-boosted footprint model' },
-  { icon: Cpu,       value: 'Llama 3.1 8B', label: 'Reasoning agent via Groq' },
+  { icon: Cpu,       value: 'GPT-OSS 120B (Groq)', label: 'Reasoning agent via GPT' },
   { icon: GitBranch, value: '2-call pipeline', label: 'Extract → estimate, not a black box' },
 ]
 
