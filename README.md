@@ -1,4 +1,4 @@
-<h1 align="center">AI Sustainability Copilot/h1>
+<h1 align="center">AI Sustainability Copilot</h1>
 
 <p align="center">
   <img src="brag.gif" alt="ASC demo" width="800">
