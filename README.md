@@ -1,4 +1,8 @@
-# AI Sustainability Copilot
+<h1 align="center">AI Sustainability Copilot/h1>
+
+<p align="center">
+  <img src="brag.gif" alt="ASC demo" width="800">
+</p>
 
 A chat-based carbon footprint estimator: a Groq-hosted LLM extracts lifestyle
 facts from natural language, calls a trained XGBoost regression model for the
