@@ -96,7 +96,10 @@ Response requirements:
 - Briefly note which inputs were assumed (defaults for anything the user
   didn't mention) vs explicitly stated, if it's relevant context.
 - Be precise, empathetic, and solution-focused. Keep it concise — a few
-  short paragraphs, not a report."""
+  short paragraphs, not a report.
+- Format in standard Markdown (the UI renders it): **bold** for key numbers,
+  "- " for bullet lists with each item on its own line. Never type bullet
+  characters like "•" by hand."""
 
 
 def get_threshold_instruction(monthly_co2: float) -> str:
