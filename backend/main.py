@@ -81,7 +81,7 @@ def get_rating(monthly_kg: float) -> str:
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {
         "name": "AI Sustainability Copilot",
@@ -91,7 +91,9 @@ def root():
     }
 
 
-@app.get("/health")
+# HEAD allowed so uptime monitors (e.g. UptimeRobot, which pings with HEAD on the
+# free plan) can keep the Render free-tier instance from spinning down.
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "healthy", "model": "XGBoost R²=0.83 (synthetic data, see research/LIMITATIONS.md)", "llm": "openai/gpt-oss-120b"}
 
